@@ -1,0 +1,18 @@
+address: Город, улица и дом как в шапке сайта Магнита
+backend: playwright
+products:
+  - id: oats
+    name: хлопья овсяные
+    purpose: завтрак
+    quantity: 1
+    # photo: photos/oats.jpg
+  - id: yogurt
+    name: йогурт натуральный
+    purpose: в школу
+    quantity: 2
+    exclude: [клубника, с сахаром]
+    replacements: [plain-yogurt]
+  - id: plain-yogurt
+    name: йогурт без добавок
+    purpose: в школу
+    quantity: 1

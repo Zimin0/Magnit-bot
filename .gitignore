@@ -1,0 +1,13 @@
+# Локальное окружение Python
+.venv/
+__pycache__/
+*.py[cod]
+
+# Личные данные и сессии
+magnit-products.yaml
+telegram-binding.dpapi
+magnit-chrome-profile/
+magnit-bot.log
+
+# Пользовательские фотографии продуктов
+photos/
