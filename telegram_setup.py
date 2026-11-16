@@ -12,6 +12,8 @@ from logging.handlers import RotatingFileHandler
 import httpx
 
 from cart_service import CartService, SETTINGS_PATH
+from cart_assistant import CartAssistant
+from magnit_cli import MagnitCli, MagnitCliError
 from telegram_binding import BindingError, TelegramBinding, load_binding, save_binding
 from telegram_bot import poll_telegram
 
@@ -84,11 +86,19 @@ async def run_bot(binding: TelegramBinding) -> bool | None:
     def save_offset(offset: int) -> None:
         save_binding(binding.model_copy(update={'offset': offset}))
 
+    try:
+        cli = MagnitCli()
+        if not (cli.cli_dir / 'magnit.py').is_file():
+            raise MagnitCliError('Magnit CLI entrypoint is unavailable.')
+    except (MagnitCliError, OSError, ValueError):
+        raise SystemExit('Проверьте MAGNIT_CLI_DIR: укажите папку Magnit CLI с файлом magnit.py. '
+                         'Запустите бота из текущего venv командой python -m telegram_setup.') from None
     async with httpx.AsyncClient(base_url='http://127.0.0.1:11434',
                                  timeout=httpx.Timeout(180, connect=5), trust_env=False) as ollama:
         cart = CartService(ollama, SETTINGS_PATH)
+        assistant = CartAssistant(ollama, cli)
         return await poll_telegram(binding.token, binding.chat_id, binding.offset, SETTINGS_PATH,
-                                   cart.build, save_offset=save_offset)
+                                   cart.build, assistant=assistant, save_offset=save_offset)
 
 
 def main(*, rebind: bool = False) -> None:
@@ -117,3 +127,4 @@ if __name__ == '__main__':
         raise SystemExit(str(exc)) from None
     except (KeyboardInterrupt, EOFError):
         raise SystemExit('Работа остановлена.') from None
+

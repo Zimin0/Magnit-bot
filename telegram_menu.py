@@ -82,6 +82,10 @@ class BotMenu:
     cart_category: str | None = None
     cart_choices: dict[str, CartChoice] = field(default_factory=dict)
 
+    def is_idle(self) -> bool:
+        return not (self.selected or self.step or self.in_list or self.add_from_list
+                    or self.draft or self.buttons or self.cart_category or self.cart_choices)
+
     def reset(self) -> None:
         self.selected = self.step = None
         self.draft.clear()
@@ -299,3 +303,4 @@ class BotMenu:
         updated = CartSettings.model_validate({**settings.model_dump(), 'products': list(products.values())})
         save_settings(path, updated)
         await self.show_product(path, product, reply)
+

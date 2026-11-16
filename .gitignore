@@ -1,5 +1,6 @@
 # Локальное окружение Python
 .venv/
+.superpowers/
 __pycache__/
 *.py[cod]
 
@@ -11,3 +12,4 @@ magnit-bot.log
 
 # Пользовательские фотографии продуктов
 photos/
+

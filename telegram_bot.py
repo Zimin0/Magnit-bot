@@ -10,10 +10,12 @@ import httpx
 import yaml
 from pydantic import ValidationError
 
+from cart_assistant import CartAssistant
 from magnit_cart import (CART_URL, MAGNIT_APP_URL, CartError, CartSettings, CartStopped, Product,
                          check_cart_stop, load_settings, notify_telegram, save_settings)
 from telegram_binding import BindingError
-from telegram_menu import BUTTON_ACTIONS, CART_BUTTON, MENU, RESTART_BUTTON, BotMenu, main_menu
+from telegram_menu import (BACKEND_CHOICES, BUTTON_ACTIONS, CART_BUTTON, MENU, RESTART_BUTTON,
+                           SETTINGS_BUTTON, BotMenu, main_menu)
 
 
 HELP = (
@@ -34,10 +36,11 @@ logger = logging.getLogger(__name__)
 
 
 async def handle_message(message, chat_id: str, settings_path: Path, reply, build_cart, *,
-                         menu: BotMenu | None = None, edit=None, start_cart=None) -> None:
+                         menu: BotMenu | None = None, edit=None, start_cart=None, start_proposal=None) -> None:
     chat = message.get('chat', {})
     text = message.get('text')
-    if chat.get('type') != 'private' or str(chat.get('id')) != chat_id or not isinstance(text, str):
+    if (chat.get('type') != 'private' or str(chat.get('id')) != chat_id or not isinstance(text, str)
+            or ('from' in message and str(message['from'].get('id')) != chat_id)):
         return
 
     text = text.strip()
@@ -97,6 +100,14 @@ async def handle_message(message, chat_id: str, settings_path: Path, reply, buil
             await run_cart(choice, reply, build_cart, menu, edit)
         else:
             await start_cart(choice)
+        return
+    known_menu_text = (text in BUTTON_ACTIONS or text in BACKEND_CHOICES
+                      or text in {'Главное меню', 'К списку', 'Продукты', 'Добавить продукт',
+                                  'Назад', 'Настройки', 'Отмена', SETTINGS_BUTTON,
+                                  f'{SETTINGS_BUTTON} · API', f'{SETTINGS_BUTTON} · Playwright'})
+    if (not command and menu is not None and menu.is_idle() and not known_menu_text
+            and start_proposal is not None):
+        await start_proposal(text)
         return
     try:
         if menu is not None and (not command or command == '/settings'):
@@ -281,11 +292,23 @@ def edit_products(path: Path, settings: CartSettings, command: str, args: str) -
     return response
 
 
-async def poll_telegram(token: str, chat_id: str, offset: int, settings_path: Path, build_cart, *, save_offset) -> bool | None:
+async def poll_telegram(token: str, chat_id: str, offset: int, settings_path: Path, build_cart, *,
+                        assistant: CartAssistant, save_offset) -> bool | None:
     menu = BotMenu()
     cart_task = None
     stop = None
     stop_data = None
+    pending_proposal = None
+    empty_buttons = {'inline_keyboard': []}
+
+    def busy():
+        return cart_task is not None and not cart_task.done()
+
+    def busy_text():
+        if stop is not None:
+            return 'Сборка уже идёт. Остановить её можно кнопкой под сообщением о ходе сборки.'
+        return 'Сборка уже идёт. Дождитесь завершения проверки корзины.'
+
     async with httpx.AsyncClient(timeout=40) as client, AsyncExitStack() as cleanup:
         async def reply(text: str, *, reply_markup=None, photo: Path | None = None):
             if reply_markup is MENU:
@@ -322,10 +345,77 @@ async def poll_telegram(token: str, chat_id: str, offset: int, settings_path: Pa
                 logger.warning('Telegram не обновил сообщение (editMessageText, %s).', type(exc).__name__)
             raise CartError('Telegram не подтвердил обновление сообщения.')
 
+        async def status(message_id, text, *, reply_markup=empty_buttons):
+            try:
+                await edit(message_id, text, reply_markup=reply_markup)
+            except CartError:
+                await reply(text, reply_markup=reply_markup)
+
+        async def propose(text):
+            nonlocal pending_proposal
+            if busy():
+                await reply(busy_text())
+                return
+            pending_proposal = None
+            message_id = await reply('Подбираю подходящую корзину…')
+            if type(message_id) is not int:
+                raise CartError('Telegram не подтвердил сообщение с предложением корзины.')
+            try:
+                proposal = await assistant.propose(text, load_settings(settings_path))
+                if proposal.basket_id is None:
+                    await status(message_id, proposal.message)
+                    return
+                basket = next((basket for basket in load_settings(settings_path).baskets
+                               if basket.id == proposal.basket_id), None)
+                if basket is None:
+                    raise CartError('Эта корзина больше не существует. Запросите новое предложение.')
+                nonce = token_hex(16)
+                markup = {'inline_keyboard': [[
+                    {'text': 'Собрать корзину', 'callback_data': 'cart-confirm:' + nonce},
+                    {'text': 'Отмена', 'callback_data': 'cart-cancel:' + nonce},
+                ]]}
+                # Only the exact, successfully edited message can authorize execution.
+                await edit(message_id, f'{proposal.message}\nКорзина: «{basket.name}».', reply_markup=markup)
+                pending_proposal = (nonce, basket.id, message_id)
+            except CartError as exc:
+                await status(message_id, str(exc))
+
+        async def execute_proposal(basket, message_id):
+            phases = {'reading': 'Читаю текущую корзину', 'replacing': 'Заменяю корзину',
+                      'verifying': 'Проверяю состав', 'checkout': 'Проверяю наличие и сумму'}
+
+            async def progress(phase):
+                await status(message_id, phases[phase])
+
+            try:
+                result = await assistant.execute(basket, progress)
+            except CartError as exc:
+                await status(message_id, str(exc))
+            except Exception as exc:
+                logger.error('Помощник завершил сборку с ошибкой (%s).', type(exc).__name__)
+                await status(message_id, 'Не удалось подтвердить сборку. Проверьте корзину в приложении.')
+            else:
+                rows = [f'Корзина «{result.basket_name}» собрана и проверена.']
+                if result.total is not None:
+                    rows.append(f'Итого: {result.total // 100},{result.total % 100:02d} ₽')
+                unavailable = ', '.join(result.unavailable)
+                if len(unavailable) > 2000:
+                    unavailable = unavailable[:1999] + '…'
+                rows.append(f'Недоступно SKU: {len(result.unavailable)}' + (f' — {unavailable}' if unavailable else ''))
+                await status(message_id, '\n'.join(rows), reply_markup=CART_LINKS)
+
+        async def answer_callback(callback, text):
+            try:
+                await client.post(f'https://api.telegram.org/bot{token}/answerCallbackQuery', json={
+                    'callback_query_id': callback['id'], 'text': text,
+                }, timeout=5)
+            except httpx.RequestError:
+                logger.warning('Telegram не подтвердил нажатие кнопки.')
+
         async def start_cart(choice):
             nonlocal cart_task, stop, stop_data
-            if cart_task is not None and not cart_task.done():
-                await reply('Сборка уже идёт. Остановить её можно кнопкой под сообщением о ходе сборки.')
+            if busy():
+                await reply(busy_text())
                 return
             stop = asyncio.Event()
             stop_data = 'cart-stop:' + token_hex(8)
@@ -375,30 +465,65 @@ async def poll_telegram(token: str, chat_id: str, offset: int, settings_path: Pa
                     return
                 try:
                     if callback := update.get('callback_query'):
-                        chat = callback.get('message', {}).get('chat', {})
-                        if (chat.get('type') == 'private' and str(chat.get('id')) == chat_id
-                                and str(callback.get('from', {}).get('id')) == chat_id):
-                            active = cart_task is not None and not cart_task.done() and callback.get('data') == stop_data
+                        message = callback.get('message', {})
+                        chat = message.get('chat', {})
+                        owner = (chat.get('type') == 'private' and str(chat.get('id')) == chat_id
+                                 and str(callback.get('from', {}).get('id')) == chat_id)
+                        data = callback.get('data', '')
+                        action, _, nonce = data.partition(':') if isinstance(data, str) else ('', '', '')
+                        if action in {'cart-confirm', 'cart-cancel'}:
+                            valid = (owner and pending_proposal is not None
+                                     and nonce == pending_proposal[0]
+                                     and type(message.get('message_id')) is int
+                                     and message['message_id'] == pending_proposal[2])
+                            if not valid:
+                                await answer_callback(callback, 'Это предложение устарело. Запросите новое.')
+                            elif busy() and action == 'cart-confirm':
+                                pending_proposal = None
+                                await answer_callback(callback, busy_text())
+                            else:
+                                _, basket_id, message_id = pending_proposal
+                                pending_proposal = None
+                                await answer_callback(callback, 'Собираю корзину…' if action == 'cart-confirm' else 'Отменено.')
+                                if action == 'cart-cancel':
+                                    await status(message_id, 'Предложение отменено.')
+                                    continue
+                                try:
+                                    basket = next((basket for basket in load_settings(settings_path).baskets
+                                                   if basket.id == basket_id), None)
+                                    if basket is None:
+                                        raise CartError('Эта корзина больше не существует. Запросите новое предложение.')
+                                except CartError as exc:
+                                    await status(message_id, str(exc))
+                                    continue
+                                stop = stop_data = None
+                                cart_task = asyncio.create_task(execute_proposal(basket, message_id))
+                        elif owner:
+                            active = busy() and stop is not None and data == stop_data
                             if active:
                                 stop.set()
-                            try:
-                                await client.post(f'https://api.telegram.org/bot{token}/answerCallbackQuery', json={
-                                    'callback_query_id': callback['id'],
-                                    'text': 'Останавливаю сборку…' if active else 'Эта сборка уже завершилась.',
-                                }, timeout=5)
-                            except httpx.RequestError:
-                                logger.warning('Telegram не подтвердил нажатие кнопки.')
+                            await answer_callback(callback, 'Останавливаю сборку…' if active else 'Эта сборка уже завершилась.')
+                        else:
+                            await answer_callback(callback, 'Это предложение устарело. Запросите новое.')
                         continue
                     message = update.get('message', {})
                     chat = message.get('chat', {})
                     if (message.get('text') == RESTART_BUTTON and chat.get('type') == 'private'
-                            and str(chat.get('id')) == chat_id):
-                        if cart_task is not None and not cart_task.done():
-                            await reply('Дождитесь завершения сборки или остановите её, затем перезапустите бота.')
+                            and str(chat.get('id')) == chat_id
+                            and ('from' not in message or str(message['from'].get('id')) == chat_id)):
+                        if busy():
+                            await reply('Дождитесь завершения сборки, затем перезапустите бота.')
                             continue
                         await reply('🔄 Перезапускаю бота…', reply_markup=MENU)
                         return True
+                    if (chat.get('type') == 'private' and str(chat.get('id')) == chat_id
+                            and ('from' not in message or str(message['from'].get('id')) == chat_id)
+                            and isinstance(message.get('text'), str)
+                            and message['text'].strip()
+                            and message['text'].split(maxsplit=1)[0].split('@', 1)[0] in {'/start', '/help'}):
+                        pending_proposal = None
                     await handle_message(message, chat_id, settings_path, reply, build_cart,
-                                         menu=menu, edit=edit, start_cart=start_cart)
+                                         menu=menu, edit=edit, start_cart=start_cart, start_proposal=propose)
                 except CartError:
                     logger.warning('Telegram не подтвердил ответ на команду.')
+
