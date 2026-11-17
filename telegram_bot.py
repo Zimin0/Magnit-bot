@@ -392,17 +392,31 @@ async def poll_telegram(token: str, chat_id: str, offset: int, settings_path: Pa
         async def execute_proposal(basket, message_id):
             phases = {'reading': 'Читаю текущую корзину', 'replacing': 'Заменяю корзину',
                       'verifying': 'Проверяю состав', 'checkout': 'Проверяю наличие и сумму'}
+            current_phase = 'reading'
+
+            def render(error: str | None = None) -> str:
+                phase_names = list(phases)
+                current = phase_names.index(current_phase)
+                rows = [f'Собираю корзину «{basket.name}».', '']
+                for index, label in enumerate(phases.values()):
+                    icon = '✅' if index < current else ('❌' if error else '🔄') if index == current else '○'
+                    rows.append(f'{icon} {label}')
+                if error:
+                    rows.extend(['', f'❌ {error}'])
+                return '\n'.join(rows)
 
             async def progress(phase):
-                await status(message_id, phases[phase])
+                nonlocal current_phase
+                current_phase = phase
+                await status(message_id, render())
 
             try:
                 result = await assistant.execute(basket, progress)
             except CartError as exc:
-                await status(message_id, str(exc))
+                await status(message_id, render(str(exc)))
             except Exception as exc:
                 logger.error('Помощник завершил сборку с ошибкой (%s).', type(exc).__name__)
-                await status(message_id, 'Не удалось подтвердить сборку. Проверьте корзину в приложении.')
+                await status(message_id, render('Не удалось подтвердить сборку. Проверьте корзину в приложении.'))
             else:
                 rows = [f'Корзина «{result.basket_name}» собрана и проверена.']
                 if result.total is not None:

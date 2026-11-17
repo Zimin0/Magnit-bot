@@ -416,7 +416,8 @@ baskets:
         self.assertEqual(assistant.execute.await_args.args[0].id, 'yogurt')
         edits = [payload for method, payload in requests if method == 'editMessageText']
         self.assertTrue(all(payload['message_id'] == 71 for payload in edits))
-        for label in ('Читаю текущую корзину', 'Заменяю корзину', 'Проверяю состав', 'Проверяю наличие и сумму'):
+        for label in ('✅ Читаю текущую корзину', '✅ Заменяю корзину',
+                      '✅ Проверяю состав', '🔄 Проверяю наличие и сумму'):
             self.assertTrue(any(label in payload['text'] for payload in edits))
         final = edits[-1]
         self.assertIn('Завтрак-Йогурт', final['text'])
@@ -511,7 +512,8 @@ baskets:
         requests = await self.run_assistant_flow(assistant, [[self.message('Завтрак')], confirm, lambda _: [old]])
         assistant.execute.assert_awaited_once()
         final = [payload for method, payload in requests if method == 'editMessageText'][-1]
-        self.assertEqual(final['text'], 'Безопасная ошибка CLI.')
+        self.assertTrue(final['text'].endswith('CLI.'))
+        self.assertIn('❌', final['text'])
         self.assertEqual(final['reply_markup'], {'inline_keyboard': []})
 
     async def test_failed_final_edit_falls_back_without_executing_again(self):
