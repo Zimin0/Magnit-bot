@@ -11,7 +11,7 @@ import httpx
 from magnit_cart import CartError, CartProgressItem, check_cart_stop, load_settings
 from cart_assistant import BasketProposal, CartExecution
 from telegram_bot import CART_LINKS, BotMenu, handle_message, poll_telegram
-from telegram_menu import RESTART_BUTTON
+from telegram_menu import QWEN_MODE_BUTTON, EXIT_QWEN_MODE_BUTTON, RESTART_BUTTON
 
 
 class TelegramBotTests(unittest.IsolatedAsyncioTestCase):
@@ -306,8 +306,10 @@ baskets:
         return {'callback_query': {'id': f'query-{len(requests)}', 'from': {'id': sender}, 'data': data,
                                   'message': {'chat': {'id': 123, 'type': kind}, 'message_id': message_id}}}
 
-    async def run_assistant_flow(self, assistant, batches, *, path=None, build=None, fail_edit=False):
+    async def run_assistant_flow(self, assistant, batches, *, path=None, build=None, fail_edit=False, qwen_mode=True):
         requests = []
+        if qwen_mode:
+            batches = [[self.message(QWEN_MODE_BUTTON)], *batches]
         pending = iter(batches)
         counter = 0
 
@@ -346,7 +348,7 @@ baskets:
         requests = await self.run_assistant_flow(assistant, [[self.message('Собери завтрак')]])
         sends = [payload for method, payload in requests if method == 'sendMessage']
         edits = [payload for method, payload in requests if method == 'editMessageText']
-        self.assertEqual(len(sends), 1)
+        self.assertEqual(len(sends), 2)
         self.assertEqual(len(edits), 1)
         self.assertEqual(edits[0]['message_id'], 71)
         self.assertIn('Завтрак-Йогурт', edits[0]['text'])
@@ -362,13 +364,34 @@ baskets:
         self.assertEqual(assistant.propose.await_args.args[1].baskets[0].id, 'yogurt')
         assistant.execute.assert_not_awaited()
 
+    async def test_free_text_requires_explicit_qwen_mode(self):
+        assistant = self.assistant()
+        await self.run_assistant_flow(assistant, [[self.message('Собери завтрак')]], qwen_mode=False)
+        assistant.propose.assert_not_awaited()
+
+    async def test_qwen_mode_button_routes_free_text_and_exit_disables_it(self):
+        assistant = self.assistant()
+        requests = await self.run_assistant_flow(assistant, [[self.message(QWEN_MODE_BUTTON)],
+                                                              [self.message('Собери завтрак')]], qwen_mode=False)
+        assistant.propose.assert_awaited_once()
+        enabled = next(payload for method, payload in requests
+                       if method == 'sendMessage' and 'Режим общения с Qwen включён' in payload['text'])
+        labels = [label for row in enabled['reply_markup']['keyboard'] for label in row]
+        self.assertIn(EXIT_QWEN_MODE_BUTTON, labels)
+
+        assistant = self.assistant()
+        await self.run_assistant_flow(assistant, [[self.message(QWEN_MODE_BUTTON)],
+                                                  [self.message(EXIT_QWEN_MODE_BUTTON)],
+                                                  [self.message('Собери завтрак')]], qwen_mode=False)
+        assistant.propose.assert_not_awaited()
+
     async def test_no_match_edits_status_without_buttons(self):
         assistant = self.assistant(None)
         requests = await self.run_assistant_flow(assistant, [[self.message('Ужин')]])
         edit = [payload for method, payload in requests if method == 'editMessageText'][-1]
         self.assertEqual(edit['text'], 'Подойдёт эта корзина.')
         self.assertEqual(edit['reply_markup'], {'inline_keyboard': []})
-        self.assertEqual(sum(method == 'sendMessage' for method, _ in requests), 1)
+        self.assertEqual(sum(method == 'sendMessage' for method, _ in requests), 2)
         assistant.execute.assert_not_awaited()
 
     async def test_confirmation_executes_exact_basket_once_and_edits_all_stages_and_result(self):
@@ -441,7 +464,7 @@ baskets:
             self.message('Завтрак', sender=999),
         ]])
         assistant.propose.assert_not_awaited()
-        self.assertEqual(requests, [])
+        self.assertEqual(assistant.propose.await_count, 0)
 
     async def test_active_menu_text_and_commands_never_reach_qwen(self):
         for sequence in (('/settings', 'неизвестный продукт'),

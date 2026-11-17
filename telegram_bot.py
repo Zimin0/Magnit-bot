@@ -14,8 +14,8 @@ from cart_assistant import CartAssistant
 from magnit_cart import (CART_URL, MAGNIT_APP_URL, CartError, CartSettings, CartStopped, Product,
                          check_cart_stop, load_settings, notify_telegram, save_settings)
 from telegram_binding import BindingError
-from telegram_menu import (BACKEND_CHOICES, BUTTON_ACTIONS, CART_BUTTON, MENU, RESTART_BUTTON,
-                           SETTINGS_BUTTON, BotMenu, main_menu)
+from telegram_menu import (BACKEND_CHOICES, BUTTON_ACTIONS, CART_BUTTON, EXIT_QWEN_MODE_BUTTON, MENU,
+                           QWEN_MENU, QWEN_MODE_BUTTON, RESTART_BUTTON, SETTINGS_BUTTON, BotMenu, main_menu)
 
 
 HELP = (
@@ -36,7 +36,8 @@ logger = logging.getLogger(__name__)
 
 
 async def handle_message(message, chat_id: str, settings_path: Path, reply, build_cart, *,
-                         menu: BotMenu | None = None, edit=None, start_cart=None, start_proposal=None) -> None:
+                         menu: BotMenu | None = None, edit=None, start_cart=None, start_proposal=None,
+                         proposal_when_busy=None) -> None:
     chat = message.get('chat', {})
     text = message.get('text')
     if (chat.get('type') != 'private' or str(chat.get('id')) != chat_id or not isinstance(text, str)
@@ -44,6 +45,14 @@ async def handle_message(message, chat_id: str, settings_path: Path, reply, buil
         return
 
     text = text.strip()
+    if menu is not None and text == QWEN_MODE_BUTTON:
+        menu.enable_qwen_mode()
+        await reply('Режим общения с Qwen включён. Напишите, какую корзину собрать.', reply_markup=QWEN_MENU)
+        return
+    if menu is not None and text == EXIT_QWEN_MODE_BUTTON:
+        menu.reset()
+        await reply('Режим общения с Qwen выключен. Выберите действие.', reply_markup=MENU)
+        return
     if text in {'Собрать корзину', CART_BUTTON}:
         text = '/cart'
     parts = text.split(maxsplit=1)
@@ -105,8 +114,8 @@ async def handle_message(message, chat_id: str, settings_path: Path, reply, buil
                       or text in {'Главное меню', 'К списку', 'Продукты', 'Добавить продукт',
                                   'Назад', 'Настройки', 'Отмена', SETTINGS_BUTTON,
                                   f'{SETTINGS_BUTTON} · API', f'{SETTINGS_BUTTON} · Playwright'})
-    if (not command and menu is not None and menu.is_idle() and not known_menu_text
-            and start_proposal is not None):
+    if (not command and menu is not None and not known_menu_text and start_proposal is not None
+            and (menu.qwen_mode or (menu.is_idle() and proposal_when_busy is not None and proposal_when_busy()))):
         await start_proposal(text)
         return
     try:
@@ -518,12 +527,14 @@ async def poll_telegram(token: str, chat_id: str, offset: int, settings_path: Pa
                         return True
                     if (chat.get('type') == 'private' and str(chat.get('id')) == chat_id
                             and ('from' not in message or str(message['from'].get('id')) == chat_id)
-                            and isinstance(message.get('text'), str)
-                            and message['text'].strip()
-                            and message['text'].split(maxsplit=1)[0].split('@', 1)[0] in {'/start', '/help'}):
-                        pending_proposal = None
+                            and isinstance(message.get('text'), str)):
+                        normalized = message['text'].strip()
+                        command = normalized.split(maxsplit=1)[0].split('@', 1)[0] if normalized else ''
+                        if command in {'/start', '/help'} or normalized in {QWEN_MODE_BUTTON, EXIT_QWEN_MODE_BUTTON}:
+                            pending_proposal = None
                     await handle_message(message, chat_id, settings_path, reply, build_cart,
-                                         menu=menu, edit=edit, start_cart=start_cart, start_proposal=propose)
+                                         menu=menu, edit=edit, start_cart=start_cart, start_proposal=propose,
+                                         proposal_when_busy=busy)
                 except CartError:
                     logger.warning('Telegram не подтвердил ответ на команду.')
 

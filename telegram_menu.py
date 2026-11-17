@@ -14,6 +14,8 @@ PRODUCTS_BUTTON = '📋 Продукты'
 ADD_BUTTON = '➕ Добавить продукт'
 SETTINGS_BUTTON = '⚙️ Настройки'
 RESTART_BUTTON = '🔄 Перезапустить бота'
+QWEN_MODE_BUTTON = '🤖 Общение с Qwen'
+EXIT_QWEN_MODE_BUTTON = '⬅️ Выйти из общения с Qwen'
 BACKEND_CHOICES = {'🌐 Playwright': 'playwright', '🧪 API': 'api'}
 BACK = ('⬅️ Назад',)
 PURPOSES = ('🍳 Завтрак', '🎒 В школу')
@@ -22,12 +24,16 @@ STANDARD_BASKETS = {'завтрак': 'Обычный завтрак', 'в шк�
 QUANTITIES = ('1️⃣', '2️⃣', '3️⃣')
 CLEAR = ('🧹 Очистить',)
 CONFIRM_DELETE = '✅ Подтвердить удаление'
-MENU = keyboard((CART_BUTTON, PRODUCTS_BUTTON), (SETTINGS_BUTTON,), (RESTART_BUTTON,))
+MENU = keyboard((CART_BUTTON, PRODUCTS_BUTTON), (QWEN_MODE_BUTTON,), (SETTINGS_BUTTON,), (RESTART_BUTTON,))
 
 
 def main_menu(backend: str) -> dict:
     mode = 'API' if backend == 'api' else 'Playwright'
-    return keyboard((CART_BUTTON, PRODUCTS_BUTTON), (f'{SETTINGS_BUTTON} · {mode}',), (RESTART_BUTTON,))
+    return keyboard((CART_BUTTON, PRODUCTS_BUTTON), (QWEN_MODE_BUTTON,),
+                    (f'{SETTINGS_BUTTON} · {mode}',), (RESTART_BUTTON,))
+
+
+QWEN_MENU = keyboard((EXIT_QWEN_MODE_BUTTON,))
 
 
 CARD_MENU = keyboard((BACK[0], '📷 Фото'), ('✏️ Название', '📦 Количество'),
@@ -81,6 +87,7 @@ class BotMenu:
     pending_cart_notice: str | None = None
     cart_category: str | None = None
     cart_choices: dict[str, CartChoice] = field(default_factory=dict)
+    qwen_mode: bool = False
 
     def is_idle(self) -> bool:
         return not (self.selected or self.step or self.in_list or self.add_from_list
@@ -93,6 +100,11 @@ class BotMenu:
         self.in_list = self.add_from_list = False
         self.cart_category = None
         self.cart_choices.clear()
+        self.qwen_mode = False
+
+    def enable_qwen_mode(self) -> None:
+        self.reset()
+        self.qwen_mode = True
 
     async def choose_cart(self, settings: CartSettings, reply) -> None:
         self.reset()
