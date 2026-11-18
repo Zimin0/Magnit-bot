@@ -93,10 +93,9 @@ async def run_bot(binding: TelegramBinding) -> bool | None:
         settings = load_settings(SETTINGS_PATH)
         async with open_profile(headless=True) as page:
             cli_context = await capture_cli_context(page, settings.address)
-    except CartError:
+    except CartError as exc:
         raise SystemExit(
-            'Не удалось получить сессию «Магнита» из локального профиля Chrome. '
-            'Запустите python -m magnit_browser, проверьте вход, доставку и адрес, затем закройте Chrome.'
+            f'Не удалось получить сессию «Магнита»: {exc}'
         ) from None
     try:
         cli = MagnitCli(context=cli_context)

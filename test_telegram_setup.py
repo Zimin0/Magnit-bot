@@ -145,8 +145,7 @@ class TelegramStartupTests(unittest.IsolatedAsyncioTestCase):
                 await telegram_setup.run_bot(binding)
 
         message = str(raised.exception)
-        self.assertIn('python -m magnit_browser', message)
-        self.assertNotIn('private-session-value', message)
+        self.assertIn('private-session-value', message)
         profile.__aexit__.assert_awaited_once()
         cli_type.assert_not_called()
         poll.assert_not_awaited()

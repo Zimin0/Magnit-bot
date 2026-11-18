@@ -90,8 +90,12 @@ class MagnitStore:
             await auth.wait_for(state='visible')
         except TimeoutError:
             raise CartError('Не удалось проверить вход на сайте «Магнита». Откройте локальный профиль и проверьте вход.') from None
-        if normalized(await auth.inner_text()) not in {'профиль', 'моякарта'}:
-            raise CartError('Войдите в «Магнит» в выделенном браузере по инструкции.')
+        auth_text = (await auth.inner_text()).strip()
+        if normalized(auth_text) not in {'профиль', 'моякарта'}:
+            raise CartError(
+                f'В профиле Магнит-бота сайт показывает «{auth_text[:40]}», а не профиль аккаунта. '
+                'Войдите в открывшемся окне Chrome именно для этого профиля.'
+            )
         selector = self.page.locator('button.pl-shop-select-bar:visible').first
         await selector.wait_for(state='visible')
         title = selector.locator('.pl-shop-select-bar__info--title')
@@ -250,11 +254,19 @@ def setup() -> None:
     else:
         raise CartError('Не удалось найти установленный Google Chrome.')
 
-    print('Войдите в «Магнит», выберите доставку и нужный адрес, затем закройте окно Chrome.')
+    PROFILE.mkdir(parents=True, exist_ok=True)
+    print(f'Открываю отдельный профиль Магнит-бота: {PROFILE}')
+    print('Проверьте, что в адресной строке открыт magnit.ru. Войдите, выберите доставку и нужный адрес.')
+    print('Не закрывайте это окно PowerShell, пока не закончите вход и не закроете окно Chrome.')
     try:
-        subprocess.run([str(chrome), f'--user-data-dir={PROFILE}', HOME], check=True)
+        completed = subprocess.run([
+            str(chrome), f'--user-data-dir={PROFILE}', '--profile-directory=Default',
+            '--no-first-run', '--new-window', HOME,
+        ], check=False)
     except (OSError, subprocess.CalledProcessError):
         raise CartError('Не удалось открыть Chrome для входа в «Магнит».') from None
+    if completed.returncode != 0:
+        raise CartError(f'Chrome завершился с кодом {completed.returncode}; проверьте, что профиль не занят.')
 
 
 if __name__ == '__main__':
