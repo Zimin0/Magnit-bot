@@ -187,7 +187,8 @@ class CartAssistantTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(type(payload['options'][key]), int)
             self.assertGreater(payload['options'][key], 0)
             self.assertLessEqual(payload['options'][key], 32768)
-        self.assertEqual(payload['format'], BasketProposal.model_json_schema())
+        self.assertIn('oneOf', payload['format'])
+        self.assertEqual(len(payload['format']['oneOf']), 3)
         self.assertEqual([message['role'] for message in payload['messages']], ['system', 'user'])
         skill = Path(__file__).with_name('.agents') / 'skills/magnit-cart-assistant/SKILL.md'
         self.assertEqual(payload['messages'][0]['content'], skill.read_text(encoding='utf-8'))

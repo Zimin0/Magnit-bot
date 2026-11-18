@@ -8,7 +8,7 @@ from random import Random
 from typing import Annotated, Literal, Self
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter, ValidationError, model_validator
 import yaml
 
 from magnit_cart import Basket, CartError, CartSettings, Product
@@ -41,6 +41,33 @@ class BasketProposal(BaseModel):
         if not valid:
             raise ValueError('invalid proposal action')
         return self
+
+
+class BasketAction(BaseModel):
+    model_config = ConfigDict(strict=True, extra='forbid')
+    kind: Literal['basket']
+    basket_id: str
+    items: list[ProductSelection] = Field(default_factory=list, max_length=0)
+    message: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=300)]
+
+
+class ProductsAction(BaseModel):
+    model_config = ConfigDict(strict=True, extra='forbid')
+    kind: Literal['products']
+    basket_id: None = None
+    items: list[ProductSelection] = Field(min_length=1, max_length=12)
+    message: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=300)]
+
+
+class NoAction(BaseModel):
+    model_config = ConfigDict(strict=True, extra='forbid')
+    kind: Literal['none']
+    basket_id: None = None
+    items: list[ProductSelection] = Field(default_factory=list, max_length=0)
+    message: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=300)]
+
+
+PROPOSAL_FORMAT = TypeAdapter(Annotated[BasketAction | ProductsAction | NoAction, Field(discriminator='kind')])
 
 
 @dataclass(frozen=True)
@@ -106,7 +133,7 @@ class CartAssistant:
             response = await self.ollama.post('/api/chat', json={
                 'model': 'qwen3:8b', 'stream': False, 'think': False,
                 'options': {'num_ctx': 4096, 'num_predict': 512},
-                'format': BasketProposal.model_json_schema(),
+                'format': PROPOSAL_FORMAT.json_schema(),
                 'messages': [
                     {'role': 'system', 'content': skill},
                     {'role': 'user', 'content': json.dumps(request_data, ensure_ascii=False)},
