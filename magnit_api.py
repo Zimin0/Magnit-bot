@@ -13,7 +13,17 @@ ORIGIN = 'https://magnit.ru'
 CART_PATH = '/webgate/v1/carts/lite'
 SEARCH_PATH = '/webgate/v2/goods/search'
 CONTEXT_HEADERS = {'x-app-version', 'x-client-name', 'x-device-platform', 'x-device-id', 'x-device-tag',
-                   'x-magnit-bff', 'x-permissions-jwt', 'x-platform-version', 'x-service', 'x-store-code'}
+                   'x-magnit-bff', 'x-permissions-jwt', 'x-platform-version', 'x-service', 'x-store-code',
+                   'x-address-id', 'x-delivery-type'}
+CLI_CONTEXT_HEADERS = {
+    'x-device-id': 'MAGNIT_DEVICE_ID',
+    'x-device-tag': 'MAGNIT_DEVICE_TAG',
+    'x-permissions-jwt': 'MAGNIT_PERMISSIONS_JWT',
+    'x-store-code': 'MAGNIT_STORE_CODE',
+    'x-address-id': 'MAGNIT_ADDRESS_ID',
+    'x-service': 'MAGNIT_SERVICE',
+    'x-delivery-type': 'MAGNIT_DELIVERY_TYPE',
+}
 logger = logging.getLogger(__name__)
 
 
@@ -55,6 +65,57 @@ def read_lite_cart(payload, *, for_clear: bool = False) -> LiteCart:
     return cart
 
 
+async def _observe_cart_context(page, address: str) -> tuple[LiteCart, dict[str, str], MagnitStore]:
+    from playwright.async_api import Error, TimeoutError
+
+    browser_store = MagnitStore(page, address)
+    failure = ''
+    for attempt in range(1, 3):
+        response_timeout = 12000
+        if attempt > 1:
+            logger.warning('Повторяю подключение к API «Магнита»: %s', failure)
+            await asyncio.sleep(0.5)
+            response_timeout = 20000
+        step = 'загрузка страницы корзины'
+        try:
+            async with page.expect_response(
+                lambda response: response.url == ORIGIN + CART_PATH
+                and response.request.method == 'GET',
+                timeout=response_timeout,
+            ) as observed:
+                await page.goto(CART_URL, wait_until='domcontentloaded')
+                step = 'проверка входа и доставки'
+                await browser_store.check_account()
+                step = 'ожидание ответа корзины'
+            response = await observed.value
+            if not response.ok:
+                failure = f'«Магнит» ответил HTTP {response.status} при чтении корзины.'
+                if response.status == 408 or 500 <= response.status <= 599:
+                    continue
+                raise CartError(failure)
+            step = 'чтение ответа корзины'
+            original = read_lite_cart(await response.json(), for_clear=True)
+            request_headers = {name.lower(): value for name, value in response.request.headers.items()}
+            headers = {name: request_headers[name] for name in CONTEXT_HEADERS if name in request_headers}
+            return original, headers, browser_store
+        except TimeoutError:
+            failure = f'Истекло время ожидания ({step}).'
+        except Error:
+            failure = f'Браузер прервал операцию ({step}).'
+        except ValueError:
+            failure = 'Ответ корзины не удалось прочитать как JSON.'
+    raise CartError(f'Не удалось подключиться к корзине «Магнита» за две попытки. {failure}') from None
+
+
+async def capture_cli_context(page, address: str) -> dict[str, str]:
+    """Capture only the live request values required by magnit-cli."""
+    _, headers, _ = await _observe_cart_context(page, address)
+    if any(not headers.get(header) for header in CLI_CONTEXT_HEADERS):
+        raise CartError('Не удалось получить полный контекст текущей корзины для Magnit CLI.')
+    return {environment_name: headers[header]
+            for header, environment_name in CLI_CONTEXT_HEADERS.items()}
+
+
 class MagnitApiStore:
     def __init__(self, page, headers: dict[str, str], browser_store: MagnitStore | None = None):
         self.page = page
@@ -65,43 +126,7 @@ class MagnitApiStore:
 
     @classmethod
     async def connect(cls, page, address: str):
-        from playwright.async_api import Error, TimeoutError
-
-        browser_store = MagnitStore(page, address)
-        failure = ''
-        for attempt in range(1, 3):
-            response_timeout = 12000
-            if attempt > 1:
-                logger.warning('Повторяю подключение к API «Магнита»: %s', failure)
-                await asyncio.sleep(0.5)
-                response_timeout = 20000
-            step = 'загрузка страницы корзины'
-            try:
-                async with page.expect_response(lambda response: response.url == ORIGIN + CART_PATH
-                                                and response.request.method == 'GET', timeout=response_timeout) as observed:
-                    await page.goto(CART_URL, wait_until='domcontentloaded')
-                    step = 'проверка входа и доставки'
-                    await browser_store.check_account()
-                    step = 'ожидание ответа корзины'
-                response = await observed.value
-                if not response.ok:
-                    failure = f'«Магнит» ответил HTTP {response.status} при чтении корзины.'
-                    if response.status == 408 or 500 <= response.status <= 599:
-                        continue
-                    raise CartError(failure)
-                step = 'чтение ответа корзины'
-                original = read_lite_cart(await response.json(), for_clear=True)
-                # These values are scoped to this live Chrome tab and the same site origin.
-                headers = {name: value for name, value in response.request.headers.items() if name in CONTEXT_HEADERS}
-                break
-            except TimeoutError:
-                failure = f'Истекло время ожидания ({step}).'
-            except Error:
-                failure = f'Браузер прервал операцию ({step}).'
-            except ValueError:
-                failure = 'Ответ корзины не удалось прочитать как JSON.'
-        else:
-            raise CartError(f'Не удалось подключиться к корзине «Магнита» за две попытки. {failure}') from None
+        original, headers, browser_store = await _observe_cart_context(page, address)
         if headers.get('x-service') != 'express' or not headers.get('x-store-code'):
             raise CartError('API-режим пока поддерживает экспресс-доставку с выбранным магазином.')
         store = cls(page, headers, browser_store)

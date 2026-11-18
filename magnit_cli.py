@@ -7,14 +7,27 @@ import math
 import os
 from pathlib import Path
 import sys
+from types import MappingProxyType
 
 
 class MagnitCliError(Exception):
     """A safe error that may be shown without exposing CLI/session data."""
 
 
+CLI_CONTEXT_KEYS = frozenset({
+    'MAGNIT_DEVICE_ID',
+    'MAGNIT_DEVICE_TAG',
+    'MAGNIT_PERMISSIONS_JWT',
+    'MAGNIT_STORE_CODE',
+    'MAGNIT_ADDRESS_ID',
+    'MAGNIT_SERVICE',
+    'MAGNIT_DELIVERY_TYPE',
+})
+
+
 class MagnitCli:
-    def __init__(self, cli_dir: str | Path | None = None, *, timeout: float = 60.0):
+    def __init__(self, cli_dir: str | Path | None = None, *, context: Mapping[str, str],
+                 timeout: float = 60.0):
         if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
                 or not math.isfinite(timeout) or timeout <= 0):
             raise MagnitCliError('CLI timeout must be a finite positive number.')
@@ -26,6 +39,10 @@ class MagnitCli:
             self.cli_dir = Path(configured_dir).resolve()
         except (OSError, ValueError, TypeError):
             raise MagnitCliError('Magnit CLI directory is invalid.') from None
+        if (not isinstance(context, Mapping) or set(context) != CLI_CONTEXT_KEYS
+                or any(not isinstance(value, str) or not value.strip() for value in context.values())):
+            raise MagnitCliError('Magnit CLI context is invalid.')
+        self._context = MappingProxyType(dict(context))
 
     async def run(self, command: str, *args: str) -> object:
         if not isinstance(command, str) or command not in ('cart', 'cart-set', 'checkout-preview'):
@@ -35,11 +52,14 @@ class MagnitCli:
         entrypoint = self.cli_dir / 'magnit.py'
         if not entrypoint.is_file():
             raise MagnitCliError('Magnit CLI entrypoint is unavailable.')
+        environment = os.environ.copy()
+        environment.update(self._context)
         try:
             process = await asyncio.create_subprocess_exec(
                 sys.executable, str(entrypoint), command, *args,
                 cwd=str(self.cli_dir), stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=environment,
             )
         except (OSError, ValueError):
             raise MagnitCliError('Magnit CLI could not be started.') from None

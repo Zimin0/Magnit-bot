@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from types import SimpleNamespace
 import asyncio
 
-from magnit_api import MagnitApiStore
+from magnit_api import MagnitApiStore, capture_cli_context
 from magnit_cart import Candidate, CartError, CartSnapshot
 from magnit_checkout import checkout_snapshot
 
@@ -16,6 +16,76 @@ def cart(*rows):
 
 
 class MagnitApiTests(unittest.IsolatedAsyncioTestCase):
+    async def test_capture_cli_context_observes_cart_and_returns_only_cli_allowlist(self):
+        headers = {
+            'X-Device-Id': 'device-id',
+            'x-device-tag': 'device-tag',
+            'X-Permissions-Jwt': 'permissions-jwt',
+            'x-store-code': 'store-code',
+            'X-Address-Id': 'address-id',
+            'x-service': 'express',
+            'X-Delivery-Type': 'delivery',
+            'authorization': 'must-not-leak',
+        }
+        response = SimpleNamespace(
+            ok=True,
+            status=200,
+            request=SimpleNamespace(method='GET', headers=headers),
+            json=AsyncMock(return_value=cart()),
+        )
+        observed = asyncio.get_running_loop().create_future()
+        observed.set_result(response)
+        observation = AsyncMock()
+        observation.__aenter__.return_value = SimpleNamespace(value=observed)
+        page = SimpleNamespace(expect_response=MagicMock(return_value=observation), goto=AsyncMock())
+        browser = SimpleNamespace(check_account=AsyncMock())
+
+        with patch('magnit_api.MagnitStore', return_value=browser) as store_class:
+            context = await capture_cli_context(page, 'Test address')
+
+        store_class.assert_called_once_with(page, 'Test address')
+        browser.check_account.assert_awaited_once_with()
+        page.goto.assert_awaited_once_with('https://magnit.ru/ecom/cart', wait_until='domcontentloaded')
+        predicate = page.expect_response.call_args.args[0]
+        self.assertTrue(predicate(SimpleNamespace(
+            url='https://magnit.ru/webgate/v1/carts/lite',
+            request=SimpleNamespace(method='GET'),
+        )))
+        self.assertEqual(context, {
+            'MAGNIT_DEVICE_ID': 'device-id',
+            'MAGNIT_DEVICE_TAG': 'device-tag',
+            'MAGNIT_PERMISSIONS_JWT': 'permissions-jwt',
+            'MAGNIT_STORE_CODE': 'store-code',
+            'MAGNIT_ADDRESS_ID': 'address-id',
+            'MAGNIT_SERVICE': 'express',
+            'MAGNIT_DELIVERY_TYPE': 'delivery',
+        })
+
+    async def test_capture_cli_context_rejects_missing_required_header(self):
+        headers = {
+            'x-device-id': 'device-id',
+            'x-device-tag': 'device-tag',
+            'x-permissions-jwt': 'permissions-jwt',
+            'x-store-code': 'store-code',
+            'x-address-id': 'address-id',
+            'x-service': 'express',
+        }
+        response = SimpleNamespace(
+            ok=True,
+            status=200,
+            request=SimpleNamespace(method='GET', headers=headers),
+            json=AsyncMock(return_value=cart()),
+        )
+        observed = asyncio.get_running_loop().create_future()
+        observed.set_result(response)
+        observation = AsyncMock()
+        observation.__aenter__.return_value = SimpleNamespace(value=observed)
+        page = SimpleNamespace(expect_response=MagicMock(return_value=observation), goto=AsyncMock())
+
+        with patch('magnit_api.MagnitStore', return_value=SimpleNamespace(check_account=AsyncMock())):
+            with self.assertRaisesRegex(CartError, 'контекст'):
+                await capture_cli_context(page, 'Test address')
+
     async def test_duplicate_positions_can_be_cleared_but_not_edited(self):
         store = MagnitApiStore(None, {})
         duplicates = cart(('123', 1), ('123', 2))

@@ -13,6 +13,9 @@ import httpx
 
 from cart_service import CartService, SETTINGS_PATH
 from cart_assistant import CartAssistant
+from magnit_api import capture_cli_context
+from magnit_browser import open_profile
+from magnit_cart import CartError, load_settings
 from magnit_cli import MagnitCli, MagnitCliError
 from telegram_binding import BindingError, TelegramBinding, load_binding, save_binding
 from telegram_bot import poll_telegram
@@ -87,7 +90,16 @@ async def run_bot(binding: TelegramBinding) -> bool | None:
         save_binding(binding.model_copy(update={'offset': offset}))
 
     try:
-        cli = MagnitCli()
+        settings = load_settings(SETTINGS_PATH)
+        async with open_profile(headless=True) as page:
+            cli_context = await capture_cli_context(page, settings.address)
+    except CartError:
+        raise SystemExit(
+            'Не удалось получить сессию «Магнита» из локального профиля Chrome. '
+            'Запустите python -m magnit_browser, проверьте вход, доставку и адрес, затем закройте Chrome.'
+        ) from None
+    try:
+        cli = MagnitCli(context=cli_context)
         if not (cli.cli_dir / 'magnit.py').is_file():
             raise MagnitCliError('Magnit CLI entrypoint is unavailable.')
     except (MagnitCliError, OSError, ValueError):
