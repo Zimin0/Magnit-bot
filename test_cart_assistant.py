@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 import httpx
+from pydantic import ValidationError
 
 from cart_assistant import BasketProposal, CartAssistant, CartAssistantError, CartExecution
 from magnit_cart import Basket, CartSettings, Product
@@ -65,7 +66,8 @@ class CartAssistantTests(unittest.IsolatedAsyncioTestCase):
         self.settings = CartSettings(address=PRIVATE, products=[], baskets=[configured_basket()])
         self.requests = []
         self.reply = {'message': {'role': 'assistant', 'content': json.dumps({
-            'basket_id': 'breakfast', 'message': 'Предлагаю корзину «Завтрак».',
+            'kind': 'basket', 'basket_id': 'breakfast', 'items': [],
+            'message': 'Предлагаю корзину «Завтрак».',
         }, ensure_ascii=False)}}
         self.status = 200
         self.network_failure = False
@@ -86,6 +88,19 @@ class CartAssistantTests(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(len(str(error)), 250)
         self.assertNotIn(PRIVATE, str(error))
         self.assertIsNone(error.__cause__)
+
+    def test_proposal_requires_strict_discriminator_and_rejects_mixed_or_duplicate_items(self):
+        invalid = [
+            {'basket_id': 'breakfast', 'message': 'old'},
+            {'kind': 'basket', 'basket_id': 'breakfast', 'items': [{'product_id': 'x'}], 'message': 'mixed'},
+            {'kind': 'products', 'basket_id': None, 'items': [
+                {'product_id': 'x', 'quantity': 1}, {'product_id': 'x', 'quantity': 2}], 'message': 'duplicate'},
+            {'kind': 'products', 'basket_id': None,
+             'items': [{'product_id': 'x', 'quantity': 13}], 'message': 'too many'},
+        ]
+        for value in invalid:
+            with self.subTest(value=value), self.assertRaises(ValidationError):
+                BasketProposal.model_validate(value)
 
     async def test_qwen_can_select_only_orderable_favorite_products_without_receiving_skus(self):
         self.settings.products = [
@@ -110,6 +125,23 @@ class CartAssistantTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.cli.events, ['cart', ('set', {'777': 2}), 'verify', 'checkout'])
         self.assertEqual(result.title, 'Любимые продукты')
         self.assertEqual(result.positions, {'777': 2})
+
+    async def test_unknown_favorite_product_id_is_rejected_before_cli(self):
+        self.settings.products = [Product(id='yogurt', sku='777', name='Йогурт', purpose='завтрак')]
+        self.reply['message']['content'] = json.dumps({
+            'kind': 'products', 'basket_id': None,
+            'items': [{'product_id': 'unknown', 'quantity': 1}], 'message': 'Неизвестный.',
+        })
+        with self.assertRaises(CartAssistantError):
+            await self.assistant.propose('Закажи неизвестный', self.settings)
+        self.assertEqual(self.cli.events, [])
+
+    async def test_product_execution_rejects_exact_cart_mismatch(self):
+        product = Product(id='yogurt', sku='777', name='Йогурт', purpose='завтрак', quantity=2)
+        self.cli.after = {'items': [{'goodId': '777', 'qnty': 1}, {'goodId': '999', 'qnty': 1}]}
+        with self.assertRaises(CartAssistantError):
+            await self.assistant.execute_products([(product, None)])
+        self.assertNotIn('checkout', self.cli.events)
 
     async def test_skill_is_loaded_as_system_prompt_and_schema_bounds_model_output(self):
         result = await self.assistant.propose('Собери завтрак', self.settings)
@@ -173,7 +205,7 @@ class CartAssistantTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.cli.events, [])
 
     async def test_only_explicit_structured_null_is_no_match(self):
-        self.reply['message']['content'] = '{"basket_id": null, "message": "Нет подходящей корзины."}'
+        self.reply['message']['content'] = '{"kind":"none","basket_id":null,"items":[],"message":"Нет подходящей корзины."}'
         result = await self.assistant.propose('Неизвестное', self.settings)
         self.assertIsNone(result.basket_id)
         self.assertEqual(result.message, 'Нет подходящей корзины.')

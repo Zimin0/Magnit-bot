@@ -291,7 +291,9 @@ baskets:
 
     def assistant(self, basket_id='yogurt'):
         return SimpleNamespace(
-            propose=AsyncMock(return_value=BasketProposal(basket_id=basket_id, message='Подойдёт эта корзина.')),
+            propose=AsyncMock(return_value=BasketProposal(
+                kind='basket' if basket_id is not None else 'none', basket_id=basket_id,
+                message='Подойдёт эта корзина.')),
             execute=AsyncMock(return_value=CartExecution('yogurt', 'Завтрак-Йогурт', {'123': 1}, 25409, ['456'])),
         )
 

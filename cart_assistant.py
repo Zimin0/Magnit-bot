@@ -27,15 +27,13 @@ class ProductSelection(BaseModel):
 
 class BasketProposal(BaseModel):
     model_config = ConfigDict(strict=True, extra='forbid')
-    kind: Literal['products', 'basket', 'none'] | None = None
+    kind: Literal['products', 'basket', 'none']
     basket_id: str | None = None
     items: list[ProductSelection] = Field(default_factory=list, max_length=12)
     message: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=300)]
 
     @model_validator(mode='after')
     def validate_action(self) -> Self:
-        if self.kind is None:
-            self.kind = 'basket' if self.basket_id is not None else 'none'
         valid = ((self.kind == 'basket' and self.basket_id is not None and not self.items)
                  or (self.kind == 'products' and self.basket_id is None and bool(self.items)
                      and len({item.product_id for item in self.items}) == len(self.items))
