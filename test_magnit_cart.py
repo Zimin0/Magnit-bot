@@ -35,6 +35,22 @@ async def choose(product, candidates):
 
 
 class CartTests(unittest.IsolatedAsyncioTestCase):
+    def test_favorite_product_sku_is_optional_for_legacy_and_numeric_when_present(self):
+        legacy = Product(id='legacy', name='Legacy', purpose='завтрак')
+        self.assertIsNone(legacy.sku)
+        product = Product(id='yogurt', sku='12345', name='Yogurt', purpose='завтрак', quantity=2)
+        self.assertEqual(product.orderable_identity(), ('yogurt', '12345', 'Yogurt', 2))
+        with self.assertRaises(ValidationError):
+            Product(id='bad', sku='abc', name='Bad', purpose='завтрак')
+
+    def test_orderable_favorite_skus_must_be_unique(self):
+        data = {'address': 'Address', 'products': [
+            {'id': 'one', 'sku': '123', 'name': 'One', 'purpose': 'завтрак'},
+            {'id': 'two', 'sku': '123', 'name': 'Two', 'purpose': 'в школу'},
+        ]}
+        with self.assertRaises(ValidationError):
+            CartSettings.model_validate(data)
+
     async def test_stop_between_units_keeps_first_unit_and_skips_next(self):
         stop = asyncio.Event()
         store = Store()

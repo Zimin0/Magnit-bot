@@ -128,7 +128,7 @@ class TelegramBotTests(unittest.IsolatedAsyncioTestCase):
         path = Path(directory.name) / 'products.yaml'
         path.write_text('''address: Delivery address
 products:
-  - {id: school, name: Apple, purpose: в школу}
+  - {id: school, sku: '555', name: Apple, purpose: в школу}
 baskets:
   - id: yogurt
     name: Завтрак-Йогурт
@@ -428,6 +428,25 @@ baskets:
         answer_index = next(i for i, (method, _) in enumerate(requests) if method == 'answerCallbackQuery')
         progress_index = next(i for i, (_, payload) in enumerate(requests) if 'Читаю текущую корзину' in payload.get('text', ''))
         self.assertLess(answer_index, progress_index)
+
+    async def test_favorite_product_proposal_confirms_and_replaces_with_requested_quantity(self):
+        assistant = self.assistant()
+        assistant.propose.return_value = BasketProposal.model_validate({
+            'kind': 'products', 'basket_id': None,
+            'items': [{'product_id': 'school', 'quantity': 2}], 'message': 'Два любимых яблока.',
+        })
+        assistant.execute_products = AsyncMock(return_value=CartExecution(
+            'products', 'Любимые продукты', {'555': 2}, 10000, []))
+
+        requests = await self.run_assistant_flow(assistant, [[self.message('Закажи два яблока')],
+            lambda log: [self.proposal_callback(log)]])
+
+        assistant.execute_products.assert_awaited_once()
+        selections = assistant.execute_products.await_args.args[0]
+        self.assertEqual([(product.id, quantity) for product, quantity in selections], [('school', 2)])
+        proposal = next(payload for method, payload in requests
+                        if method == 'editMessageText' and payload.get('reply_markup', {}).get('inline_keyboard'))
+        self.assertIn('Apple — 2 шт.', proposal['text'])
 
     async def test_wrong_nonce_message_and_owner_callbacks_cannot_execute(self):
         assistant = self.assistant()

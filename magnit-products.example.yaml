@@ -2,17 +2,20 @@ address: Город, улица и дом как в шапке сайта Маг
 backend: playwright
 products:
   - id: oats
+    # sku: "УКАЖИТЕ_ЦИФРОВОЙ_АРТИКУЛ_ИЗ_МАГНИТА"  # обязателен для заказа через Qwen
     name: хлопья овсяные
     purpose: завтрак
     quantity: 1
     # photo: photos/oats.jpg
   - id: yogurt
+    # sku: "УКАЖИТЕ_ЦИФРОВОЙ_АРТИКУЛ_ИЗ_МАГНИТА"
     name: йогурт натуральный
     purpose: в школу
     quantity: 2
     exclude: [клубника, с сахаром]
     replacements: [plain-yogurt]
   - id: plain-yogurt
+    # sku: "УКАЖИТЕ_ЦИФРОВОЙ_АРТИКУЛ_ИЗ_МАГНИТА"
     name: йогурт без добавок
     purpose: в школу
     quantity: 1

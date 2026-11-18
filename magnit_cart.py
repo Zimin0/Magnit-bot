@@ -17,6 +17,7 @@ CART_URL = "https://magnit.ru/ecom/cart"
 MAGNIT_APP_URL = "https://redirect.appmetrica.yandex.com/serve/1109053982455637484"
 ShortText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
 PhotoRef = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=260)]
+Sku = Annotated[str, StringConstraints(pattern=r'^[0-9]+$')]
 Purpose = Literal["завтрак", "в школу"]
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,7 @@ class ItemUnavailable(CartError):
 class Product(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     id: ShortText
+    sku: Sku | None = None
     name: ShortText
     purpose: Purpose
     quantity: int = Field(default=1, ge=1, le=12)
@@ -53,10 +55,13 @@ class Product(BaseModel):
     replacements: list[ShortText] = Field(default_factory=list, max_length=3)
     photo: PhotoRef | None = None
 
+    def orderable_identity(self) -> tuple[str, str, str, int] | None:
+        return (self.id, self.sku, self.name, self.quantity) if self.sku is not None else None
+
 
 class BasketOption(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
-    sku: Annotated[str, StringConstraints(pattern=r'^[0-9]+$')]
+    sku: Sku
     name: ShortText
     query: ShortText | None = None
     photo: PhotoRef | None = None
@@ -102,10 +107,15 @@ class CartSettings(BaseModel):
         if len({(basket.category.casefold(), basket.name.casefold()) for basket in self.baskets}) != len(self.baskets):
             raise PydanticCustomError('basket_config', 'Названия корзин внутри категории должны быть уникальными.')
         ids = set()
+        orderable_skus = set()
         for product in self.products:
             if product.id in ids:
                 raise PydanticCustomError("product_reference", "ID «{id}» указан дважды.", {"id": product.id})
             ids.add(product.id)
+            if product.sku is not None:
+                if product.sku in orderable_skus:
+                    raise PydanticCustomError('product_reference', 'Артикулы любимых продуктов должны быть уникальными.')
+                orderable_skus.add(product.sku)
         for product in self.products:
             for replacement_id in product.replacements:
                 if replacement_id == product.id:

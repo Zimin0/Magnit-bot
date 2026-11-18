@@ -5,13 +5,13 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 from random import Random
-from typing import Annotated
+from typing import Annotated, Literal, Self
 
 import httpx
-from pydantic import BaseModel, ConfigDict, StringConstraints, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError, model_validator
 import yaml
 
-from magnit_cart import Basket, CartError, CartSettings
+from magnit_cart import Basket, CartError, CartSettings, Product
 from magnit_cli import MagnitCli, MagnitCliError
 
 
@@ -19,10 +19,30 @@ class CartAssistantError(CartError):
     """Safe to display; never contains raw model, CLI, or session data."""
 
 
+class ProductSelection(BaseModel):
+    model_config = ConfigDict(strict=True, extra='forbid')
+    product_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
+    quantity: int | None = Field(default=None, ge=1, le=12)
+
+
 class BasketProposal(BaseModel):
     model_config = ConfigDict(strict=True, extra='forbid')
-    basket_id: str | None
+    kind: Literal['products', 'basket', 'none'] | None = None
+    basket_id: str | None = None
+    items: list[ProductSelection] = Field(default_factory=list, max_length=12)
     message: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=300)]
+
+    @model_validator(mode='after')
+    def validate_action(self) -> Self:
+        if self.kind is None:
+            self.kind = 'basket' if self.basket_id is not None else 'none'
+        valid = ((self.kind == 'basket' and self.basket_id is not None and not self.items)
+                 or (self.kind == 'products' and self.basket_id is None and bool(self.items)
+                     and len({item.product_id for item in self.items}) == len(self.items))
+                 or (self.kind == 'none' and self.basket_id is None and not self.items))
+        if not valid:
+            raise ValueError('invalid proposal action')
+        return self
 
 
 @dataclass(frozen=True)
@@ -32,6 +52,10 @@ class CartExecution:
     positions: dict[str, int]
     total: int | None
     unavailable: list[str]
+
+    @property
+    def title(self) -> str:
+        return self.basket_name
 
 
 class CartAssistant:
@@ -61,7 +85,8 @@ class CartAssistant:
             raise CartAssistantError('Не удалось загрузить skill помощника корзины.') from None
 
     async def propose(self, text: str, settings: CartSettings) -> BasketProposal:
-        if not settings.baskets:
+        products = [product for product in settings.products if product.sku is not None]
+        if not settings.baskets and not products:
             raise CartAssistantError('Нет настроенных именных корзин. Добавьте корзину в настройках.')
         skill = self._load_skill()
         catalog = [{
@@ -70,6 +95,13 @@ class CartAssistant:
                        for group in basket.groups],
         } for basket in settings.baskets]
         allowed_ids = {item['id'] for item in catalog}
+        product_catalog = [{'id': product.id, 'name': product.name,
+                            'default_quantity': product.quantity, 'matching_words': product.required}
+                           for product in products]
+        allowed_product_ids = {item['id'] for item in product_catalog}
+        request_data = {'request': text, 'baskets': catalog}
+        if product_catalog:
+            request_data['products'] = product_catalog
         try:
             response = await self.ollama.post('/api/chat', json={
                 'model': 'qwen3:8b', 'stream': False, 'think': False,
@@ -77,8 +109,7 @@ class CartAssistant:
                 'format': BasketProposal.model_json_schema(),
                 'messages': [
                     {'role': 'system', 'content': skill},
-                    {'role': 'user', 'content': json.dumps({'request': text, 'baskets': catalog},
-                                                         ensure_ascii=False)},
+                    {'role': 'user', 'content': json.dumps(request_data, ensure_ascii=False)},
                 ],
             })
             response.raise_for_status()
@@ -88,6 +119,8 @@ class CartAssistant:
                 raise ValueError
             proposal = BasketProposal.model_validate_json(message['content'])
             if proposal.basket_id is not None and proposal.basket_id not in allowed_ids:
+                raise ValueError
+            if any(item.product_id not in allowed_product_ids for item in proposal.items):
                 raise ValueError
             return proposal
         except (httpx.HTTPError, ValueError, KeyError, TypeError, UnicodeError):
@@ -150,6 +183,21 @@ class CartAssistant:
                       progress: Callable[[str], Awaitable[None]] | None = None) -> CartExecution:
         """Replace the entire cart; caller must first obtain fresh confirmation."""
         expected = self._positions(basket)
+        return await self._execute_positions(basket.id, basket.name, expected, progress)
+
+    async def execute_products(self, selections: list[tuple[Product, int | None]],
+                               progress: Callable[[str], Awaitable[None]] | None = None) -> CartExecution:
+        expected: dict[str, int] = {}
+        for product, requested in selections:
+            if product.sku is None or product.sku in expected:
+                raise CartAssistantError('Проверьте артикулы любимых продуктов в настройках.')
+            expected[product.sku] = requested if requested is not None else product.quantity
+        if not expected:
+            raise CartAssistantError('Не выбраны любимые продукты для заказа.')
+        return await self._execute_positions('products', 'Любимые продукты', expected, progress)
+
+    async def _execute_positions(self, target_id: str, title: str, expected: dict[str, int],
+                                 progress: Callable[[str], Awaitable[None]] | None) -> CartExecution:
         try:
             if progress is not None:
                 await progress('reading')
@@ -166,5 +214,5 @@ class CartAssistant:
             total, unavailable = self._checkout(await self.cli.checkout_preview())
         except MagnitCliError:
             raise CartAssistantError('Не удалось подтвердить выполнение CLI. Проверьте текущую корзину в приложении.') from None
-        return CartExecution(basket.id, basket.name, expected, total, unavailable)
+        return CartExecution(target_id, title, expected, total, unavailable)
 

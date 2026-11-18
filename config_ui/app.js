@@ -322,13 +322,14 @@ function editOption(group, option) {
 
 function editProduct(purpose, product) {
   const listField = (name, label) => ({...textField(name, label, false), list: true, maxLength: 600});
-  edit(product ? 'Обычный продукт' : 'Новый обычный продукт', product || {purpose, quantity: 1}, [
-    nameField, numberField('quantity', 'Количество упаковок'),
+  edit(product ? 'Любимый продукт' : 'Новый любимый продукт', product || {purpose, quantity: 1}, [
+    nameField, textField('sku', 'Артикул «Магнита»'), numberField('quantity', 'Количество упаковок'),
     selectField('purpose', 'Назначение', purposes.map(value => [value, value])),
     listField('required', 'Обязательные слова через запятую'),
     listField('exclude', 'Исключения через запятую'),
     listField('replacements', 'ID замен через запятую'), photoField,
   ], values => {
+    if (!/^\d+$/.test(values.sku)) throw new Error('Артикул должен состоять из цифр.');
     if (product) Object.assign(product, values);
     else config.products.push({id: `product-${crypto.randomUUID().slice(0, 8)}`, ...values});
   }, product ? () => {
@@ -390,8 +391,10 @@ function renderProducts() {
   for (const purpose of purposes) {
     const lane = node('section', 'ordinary-lane', node('h2', '', purpose === 'завтрак' ? 'Завтрак' : 'В школу'));
     for (const product of config.products.filter(item => item.purpose === purpose)) {
-      lane.append(productCard('product', config.products, product, {purpose},
-        `${product.quantity} шт. · ${product.id}`, () => editProduct(purpose, product)));
+      const detail = product.sku ? `Артикул ${product.sku} · ${product.quantity} шт. · ${product.id}`
+        : 'Недоступен для Qwen — укажите артикул';
+      lane.append(productCard('product', config.products, product, {purpose}, detail,
+        () => editProduct(purpose, product)));
     }
     lane.append(endZone('product', config.products, {purpose}, 'Перенести продукт сюда'),
       button('＋ Продукт', () => editProduct(purpose), 'add'));

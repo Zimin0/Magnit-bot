@@ -371,25 +371,40 @@ async def poll_telegram(token: str, chat_id: str, offset: int, settings_path: Pa
                 raise CartError('Telegram не подтвердил сообщение с предложением корзины.')
             try:
                 proposal = await assistant.propose(text, load_settings(settings_path))
-                if proposal.basket_id is None:
+                if proposal.kind == 'none':
                     await status(message_id, proposal.message)
                     return
-                basket = next((basket for basket in load_settings(settings_path).baskets
-                               if basket.id == proposal.basket_id), None)
-                if basket is None:
-                    raise CartError('Эта корзина больше не существует. Запросите новое предложение.')
+                settings = load_settings(settings_path)
+                if proposal.kind == 'basket':
+                    target = next((basket for basket in settings.baskets if basket.id == proposal.basket_id), None)
+                    if target is None:
+                        raise CartError('Эта корзина больше не существует. Запросите новое предложение.')
+                    identity = target.model_dump()
+                    details = f'Корзина: «{target.name}».'
+                else:
+                    products = {product.id: product for product in settings.products}
+                    target, rows = [], []
+                    for item in proposal.items:
+                        product = products.get(item.product_id)
+                        if product is None or product.sku is None:
+                            raise CartError('Любимый продукт изменён или больше недоступен для Qwen.')
+                        quantity = item.quantity if item.quantity is not None else product.quantity
+                        target.append((product, item.quantity))
+                        rows.append(f'{product.name} — {quantity} шт.')
+                    identity = [(product.orderable_identity(), quantity) for product, quantity in target]
+                    details = 'Любимые продукты:\n' + '\n'.join(rows)
                 nonce = token_hex(16)
                 markup = {'inline_keyboard': [[
                     {'text': 'Собрать корзину', 'callback_data': 'cart-confirm:' + nonce},
                     {'text': 'Отмена', 'callback_data': 'cart-cancel:' + nonce},
                 ]]}
                 # Only the exact, successfully edited message can authorize execution.
-                await edit(message_id, f'{proposal.message}\nКорзина: «{basket.name}».', reply_markup=markup)
-                pending_proposal = (nonce, basket.id, message_id)
+                await edit(message_id, f'{proposal.message}\n{details}', reply_markup=markup)
+                pending_proposal = (nonce, proposal, message_id, identity)
             except CartError as exc:
                 await status(message_id, str(exc))
 
-        async def execute_proposal(basket, message_id):
+        async def execute_proposal(target, message_id):
             phases = {'reading': 'Читаю текущую корзину', 'replacing': 'Заменяю корзину',
                       'verifying': 'Проверяю состав', 'checkout': 'Проверяю наличие и сумму'}
             current_phase = 'reading'
@@ -397,7 +412,8 @@ async def poll_telegram(token: str, chat_id: str, offset: int, settings_path: Pa
             def render(error: str | None = None) -> str:
                 phase_names = list(phases)
                 current = phase_names.index(current_phase)
-                rows = [f'Собираю корзину «{basket.name}».', '']
+                title = target.name if not isinstance(target, list) else 'Любимые продукты'
+                rows = [f'Собираю корзину «{title}».', '']
                 for index, label in enumerate(phases.values()):
                     icon = '✅' if index < current else ('❌' if error else '🔄') if index == current else '○'
                     rows.append(f'{icon} {label}')
@@ -411,7 +427,8 @@ async def poll_telegram(token: str, chat_id: str, offset: int, settings_path: Pa
                 await status(message_id, render())
 
             try:
-                result = await assistant.execute(basket, progress)
+                result = (await assistant.execute_products(target, progress) if isinstance(target, list)
+                          else await assistant.execute(target, progress))
             except CartError as exc:
                 await status(message_id, render(str(exc)))
             except Exception as exc:
@@ -505,22 +522,33 @@ async def poll_telegram(token: str, chat_id: str, offset: int, settings_path: Pa
                                 pending_proposal = None
                                 await answer_callback(callback, busy_text())
                             else:
-                                _, basket_id, message_id = pending_proposal
+                                _, proposal, message_id, identity = pending_proposal
                                 pending_proposal = None
                                 await answer_callback(callback, 'Собираю корзину…' if action == 'cart-confirm' else 'Отменено.')
                                 if action == 'cart-cancel':
                                     await status(message_id, 'Предложение отменено.')
                                     continue
                                 try:
-                                    basket = next((basket for basket in load_settings(settings_path).baskets
-                                                   if basket.id == basket_id), None)
-                                    if basket is None:
-                                        raise CartError('Эта корзина больше не существует. Запросите новое предложение.')
+                                    settings = load_settings(settings_path)
+                                    if proposal.kind == 'basket':
+                                        target = next((basket for basket in settings.baskets
+                                                       if basket.id == proposal.basket_id), None)
+                                        if target is None or target.model_dump() != identity:
+                                            raise CartError('Эта корзина изменилась. Запросите новое предложение.')
+                                    else:
+                                        products = {product.id: product for product in settings.products}
+                                        target = []
+                                        for item, (saved_identity, saved_quantity) in zip(proposal.items, identity, strict=True):
+                                            product = products.get(item.product_id)
+                                            if (product is None or product.orderable_identity() != saved_identity
+                                                    or item.quantity != saved_quantity):
+                                                raise CartError('Любимый продукт изменился. Запросите новое предложение.')
+                                            target.append((product, item.quantity))
                                 except CartError as exc:
                                     await status(message_id, str(exc))
                                     continue
                                 stop = stop_data = None
-                                cart_task = asyncio.create_task(execute_proposal(basket, message_id))
+                                cart_task = asyncio.create_task(execute_proposal(target, message_id))
                         elif owner:
                             active = busy() and stop is not None and data == stop_data
                             if active:

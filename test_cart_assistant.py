@@ -8,7 +8,7 @@ import unittest
 import httpx
 
 from cart_assistant import BasketProposal, CartAssistant, CartAssistantError, CartExecution
-from magnit_cart import Basket, CartSettings
+from magnit_cart import Basket, CartSettings, Product
 from magnit_cli import MagnitCliError
 
 
@@ -86,6 +86,30 @@ class CartAssistantTests(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(len(str(error)), 250)
         self.assertNotIn(PRIVATE, str(error))
         self.assertIsNone(error.__cause__)
+
+    async def test_qwen_can_select_only_orderable_favorite_products_without_receiving_skus(self):
+        self.settings.products = [
+            Product(id='yogurt', sku='777', name='Йогурт', purpose='завтрак', quantity=1),
+            Product(id='legacy', name='Старый', purpose='завтрак'),
+        ]
+        self.reply['message']['content'] = json.dumps({
+            'kind': 'products', 'basket_id': None,
+            'items': [{'product_id': 'yogurt', 'quantity': 2}], 'message': 'Два йогурта.',
+        }, ensure_ascii=False)
+        proposal = await self.assistant.propose('Закажи два йогурта', self.settings)
+        self.assertEqual(proposal.kind, 'products')
+        self.assertEqual((proposal.items[0].product_id, proposal.items[0].quantity), ('yogurt', 2))
+        sent = json.loads(json.loads(self.requests[0].content)['messages'][1]['content'])
+        self.assertEqual([item['id'] for item in sent['products']], ['yogurt'])
+        self.assertNotIn('777', self.requests[0].content.decode())
+
+    async def test_product_execution_uses_default_quantity_and_replaces_exact_cart(self):
+        product = Product(id='yogurt', sku='777', name='Йогурт', purpose='завтрак', quantity=2)
+        self.cli.after = {'items': [{'goodId': '777', 'qnty': 2}]}
+        result = await self.assistant.execute_products([(product, None)])
+        self.assertEqual(self.cli.events, ['cart', ('set', {'777': 2}), 'verify', 'checkout'])
+        self.assertEqual(result.title, 'Любимые продукты')
+        self.assertEqual(result.positions, {'777': 2})
 
     async def test_skill_is_loaded_as_system_prompt_and_schema_bounds_model_output(self):
         result = await self.assistant.propose('Собери завтрак', self.settings)
