@@ -6,7 +6,6 @@ const dialog = $('editor');
 const form = $('form');
 const uploads = new Map();
 const destinations = new WeakMap();
-const purposes = ['завтрак', 'в школу'];
 let config, revision, dirty = false, saving = false, tab = 'baskets', drag;
 
 function node(tag, className, ...children) {
@@ -143,8 +142,8 @@ function finishDrag(apply) {
   card.classList.remove('drag-source');
   target?.element.classList.remove('drop-active', 'drop-before', 'drop-after');
   if (!apply || !target) return;
-  if (type === 'option' && target.list !== list && target.list.some(option => option.sku === item.sku)) {
-    status('В этой группе уже есть вариант с таким артикулом.', true);
+  if (type === 'option' && target.list !== list && target.list.some(option => option.product_id === item.product_id)) {
+    status('В этой группе уже есть такой продукт.', true);
     return;
   }
   list.splice(list.indexOf(item), 1);
@@ -258,7 +257,7 @@ function edit(title, record, specs, apply, remove) {
             uploads.set(key, await fileData(value));
             values.photo = key;
           }
-        } else if (spec.type === 'number') values[spec.name] = Number(value);
+        } else if (spec.type === 'number') values[spec.name] = value === '' && !spec.required ? null : Number(value);
         else if (spec.list) values[spec.name] = value.split(',').map(part => part.trim()).filter(Boolean);
         else values[spec.name] = value.trim() || null;
         if (spec.required && values[spec.name] === null) throw new Error(`Заполните поле «${spec.label}».`);
@@ -311,20 +310,21 @@ function editGroup(basket, group) {
 
 function editOption(group, option) {
   edit(option ? 'Товар в корзине' : 'Новый товар в корзине', option || {}, [
-    nameField, textField('sku', 'Артикул «Магнита»'), textField('query', 'Поисковый запрос', false), photoField,
+    selectField('product_id', 'Любимый продукт', config.products.map(product => [product.id, product.name])),
+    {name: 'quantity', label: 'Количество упаковок (пусто — как у продукта)', type: 'number'},
   ], values => {
-    if (!/^\d+$/.test(values.sku)) throw new Error('Артикул должен состоять из цифр.');
-    if (group.options.some(other => other !== option && other.sku === values.sku)) throw new Error('Артикул уже есть в группе.');
+    if (group.options.some(other => other !== option && other.product_id === values.product_id)) {
+      throw new Error('Этот продукт уже есть в группе.');
+    }
     if (option) Object.assign(option, values);
     else group.options.push(values);
   }, option ? () => deleteItem(group.options, option) : null);
 }
 
-function editProduct(purpose, product) {
+function editProduct(product) {
   const listField = (name, label) => ({...textField(name, label, false), list: true, maxLength: 600});
-  edit(product ? 'Любимый продукт' : 'Новый любимый продукт', product || {purpose, quantity: 1}, [
+  edit(product ? 'Любимый продукт' : 'Новый любимый продукт', product || {quantity: 1}, [
     nameField, textField('sku', 'Артикул «Магнита»'), numberField('quantity', 'Количество упаковок'),
-    selectField('purpose', 'Назначение', purposes.map(value => [value, value])),
     listField('required', 'Обязательные слова через запятую'),
     listField('exclude', 'Исключения через запятую'),
     listField('replacements', 'ID замен через запятую'), photoField,
@@ -336,14 +336,17 @@ function editProduct(purpose, product) {
     if (config.products.some(other => other.replacements.includes(product.id))) {
       throw new Error('Сначала уберите этот ID из списков замен других продуктов.');
     }
+    if (config.baskets.some(basket => basket.groups.some(group => group.options.some(option => option.product_id === product.id)))) {
+      throw new Error('Сначала уберите продукт из корзин.');
+    }
     deleteItem(config.products, product);
   } : null);
 }
 
-function productCard(type, list, item, assign, subtitle, open) {
+function productCard(type, list, item, assign, subtitle, open, display = item) {
   const card = node('div', 'item');
-  card.append(grip(type, list, item, card, item.name), thumbnail(item.photo),
-    node('div', 'item-info', item.name, node('small', '', subtitle)), button('✎', open, 'edit', `Редактировать: ${item.name}`));
+  card.append(grip(type, list, item, card, display.name), thumbnail(display.photo),
+    node('div', 'item-info', display.name, node('small', '', subtitle)), button('✎', open, 'edit', `Редактировать: ${display.name}`));
   return destination(card, type, list, item, assign);
 }
 
@@ -353,7 +356,10 @@ function groupCard(basket, group) {
     node('strong', '', group.name, node('div', 'meta', `${group.pick} из ${group.options.length} · ${group.strategy === 'random' ? 'случайно' : 'по порядку'}`)),
     button('✎', () => editGroup(basket, group), 'edit', `Редактировать группу: ${group.name}`)));
   for (const option of group.options) {
-    card.append(productCard('option', group.options, option, {}, `Артикул ${option.sku}`, () => editOption(group, option)));
+    const product = config.products.find(item => item.id === option.product_id);
+    const quantity = option.quantity ?? product.quantity;
+    card.append(productCard('option', group.options, option, {}, `${quantity} шт. · артикул ${product.sku}`,
+      () => editOption(group, option), product));
   }
   card.append(endZone('option', group.options, {}, 'Перенести товар сюда'),
     button('＋ Товар', () => editOption(group), 'add'));
@@ -388,18 +394,14 @@ function renderBaskets() {
 
 function renderProducts() {
   const grid = node('div', 'ordinary-grid');
-  for (const purpose of purposes) {
-    const lane = node('section', 'ordinary-lane', node('h2', '', purpose === 'завтрак' ? 'Завтрак' : 'В школу'));
-    for (const product of config.products.filter(item => item.purpose === purpose)) {
-      const detail = product.sku ? `Артикул ${product.sku} · ${product.quantity} шт. · ${product.id}`
-        : 'Недоступен для Qwen — укажите артикул';
-      lane.append(productCard('product', config.products, product, {purpose}, detail,
-        () => editProduct(purpose, product)));
-    }
-    lane.append(endZone('product', config.products, {purpose}, 'Перенести продукт сюда'),
-      button('＋ Продукт', () => editProduct(purpose), 'add'));
-    grid.append(lane);
+  const lane = node('section', 'ordinary-lane', node('h2', '', 'Доступны для заказа'));
+  for (const product of config.products) {
+    const detail = `Артикул ${product.sku} · ${product.quantity} шт. · ${product.id}`;
+    lane.append(productCard('product', config.products, product, {}, detail, () => editProduct(product)));
   }
+  lane.append(endZone('product', config.products, {}, 'Перенести продукт сюда'),
+    button('＋ Продукт', () => editProduct(), 'add'));
+  grid.append(lane);
   workspace.append(grid);
 }
 
@@ -449,7 +451,7 @@ async function save() {
   workspace.inert = true;
   status('Сохраняю…');
   try {
-    const records = [...config.products, ...config.baskets.flatMap(basket => basket.groups.flatMap(group => group.options))];
+    const records = config.products;
     const photos = Object.fromEntries(records.filter(record => uploads.has(record.photo))
       .map(record => [record.photo, uploads.get(record.photo).split(',')[1]]));
     const data = await request('/api/config', {method: 'PUT', headers: {'Content-Type': 'application/json'},

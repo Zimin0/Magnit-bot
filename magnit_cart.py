@@ -48,7 +48,7 @@ class Product(BaseModel):
     id: ShortText
     sku: Sku | None = None
     name: ShortText
-    purpose: Purpose
+    purpose: Purpose | None = None
     quantity: int = Field(default=1, ge=1, le=12)
     required: list[ShortText] = Field(default_factory=list, max_length=5)
     exclude: list[ShortText] = Field(default_factory=list, max_length=5)
@@ -61,10 +61,8 @@ class Product(BaseModel):
 
 class BasketOption(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
-    sku: Sku
-    name: ShortText
-    query: ShortText | None = None
-    photo: PhotoRef | None = None
+    product_id: ShortText
+    quantity: int | None = Field(default=None, ge=1, le=12)
 
 
 class BasketGroup(BaseModel):
@@ -76,8 +74,8 @@ class BasketGroup(BaseModel):
 
     @model_validator(mode='after')
     def validate_pick(self) -> Self:
-        if len({item.sku for item in self.options}) != len(self.options) or self.pick > len(self.options):
-            raise PydanticCustomError('basket_config', 'В группе «{name}» проверьте число вариантов и уникальность артикулов.',
+        if len({item.product_id for item in self.options}) != len(self.options) or self.pick > len(self.options):
+            raise PydanticCustomError('basket_config', 'В группе «{name}» проверьте число вариантов и уникальность продуктов.',
                                       {'name': self.name})
         return self
 
@@ -93,7 +91,7 @@ class Basket(BaseModel):
 class CartSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     address: ShortText
-    products: list[Product] = Field(max_length=12)
+    products: list[Product] = Field(max_length=100)
     backend: Literal['playwright', 'api'] = 'playwright'
     baskets: list[Basket] = Field(default_factory=list, max_length=24)
     categories: list[ShortText] = Field(default_factory=list)
@@ -107,11 +105,13 @@ class CartSettings(BaseModel):
         if len({(basket.category.casefold(), basket.name.casefold()) for basket in self.baskets}) != len(self.baskets):
             raise PydanticCustomError('basket_config', 'Названия корзин внутри категории должны быть уникальными.')
         ids = set()
+        products_by_id = {}
         orderable_skus = set()
         for product in self.products:
             if product.id in ids:
                 raise PydanticCustomError("product_reference", "ID «{id}» указан дважды.", {"id": product.id})
             ids.add(product.id)
+            products_by_id[product.id] = product
             if product.sku is not None:
                 if product.sku in orderable_skus:
                     raise PydanticCustomError('product_reference', 'Артикулы любимых продуктов должны быть уникальными.')
@@ -123,6 +123,21 @@ class CartSettings(BaseModel):
                 if replacement_id not in ids:
                     raise PydanticCustomError("product_reference", "ID «{id}» ссылается на отсутствующую запись «{target}».",
                                               {"id": product.id, "target": replacement_id})
+        for basket in self.baskets:
+            for group in basket.groups:
+                for option in group.options:
+                    if option.product_id not in ids:
+                        raise PydanticCustomError(
+                            'product_reference',
+                            'Корзина «{basket}» ссылается на отсутствующий продукт «{target}».',
+                            {'basket': basket.name, 'target': option.product_id},
+                        )
+                    if products_by_id[option.product_id].sku is None:
+                        raise PydanticCustomError(
+                            'product_reference',
+                            'Корзина «{basket}» ссылается на продукт «{target}» без артикула.',
+                            {'basket': basket.name, 'target': option.product_id},
+                        )
         return self
 
 
@@ -251,7 +266,9 @@ class CartProgressItem:
     status: Literal['pending', 'added', 'unavailable']
 
 
-async def select_basket(store, basket: Basket, snapshot: CartSnapshot, stage=None, stop=None):
+async def select_basket(store, basket: Basket, products: list[Product], snapshot: CartSnapshot,
+                        stage=None, stop=None):
+    products_by_id = {product.id: product for product in products}
     selections = []
     for group in basket.groups:
         options = list(group.options)
@@ -259,21 +276,24 @@ async def select_basket(store, basket: Basket, snapshot: CartSnapshot, stage=Non
             shuffle(options)
         selected = 0
         for option in options:
+            product = products_by_id[option.product_id]
             if stage:
-                await stage('searching', option.name)
+                await stage('searching', product.name)
             check_cart_stop(stop)
-            candidates = await store.search(option.query or option.name)
+            candidates = await store.search(product.name)
             check_cart_stop(stop)
-            candidate = next((item for item in candidates if item.id == option.sku
+            candidate = next((item for item in candidates if item.id == product.sku
                               and snapshot.quantities.get(item.id, 0) is not None
                               and (item.stock is None or item.stock > 0)), None)
             if stage:
-                await stage('searching', option.name, 'found' if candidate else 'unavailable')
+                await stage('searching', product.name, 'found' if candidate else 'unavailable')
             if candidate is None:
                 continue
-            requested = option.name if group.strategy == 'random' else group.options[selected].name
-            replacement = group.strategy == 'ordered' and option.sku != group.options[selected].sku
-            selections.append((RequestedItem(requested, basket.category, 1), candidate, replacement))
+            requested_option = option if group.strategy == 'random' else group.options[selected]
+            requested_product = products_by_id[requested_option.product_id]
+            quantity = option.quantity if option.quantity is not None else product.quantity
+            replacement = group.strategy == 'ordered' and option.product_id != requested_option.product_id
+            selections.append((RequestedItem(requested_product.name, basket.category, quantity), candidate, replacement))
             selected += 1
             if selected == group.pick:
                 break
@@ -334,7 +354,7 @@ async def assemble_cart(store, products: list[Product], choose, *, purpose: Purp
     if basket is None:
         selections = await select_products(store, products, choose, purpose, snapshot, stage, stop)
     else:
-        selections = await select_basket(store, basket, snapshot, stage, stop)
+        selections = await select_basket(store, basket, products, snapshot, stage, stop)
     check_cart_stop(stop)
     targets: dict[str, int] = {}
     for product, candidate, _ in selections:

@@ -109,7 +109,8 @@ class BotMenu:
     async def choose_cart(self, settings: CartSettings, reply) -> None:
         self.reset()
         self.step = 'cart-category'
-        labels = {product.purpose: STANDARD_CATEGORIES[product.purpose] for product in settings.products}
+        labels = {product.purpose: STANDARD_CATEGORIES[product.purpose]
+                  for product in settings.products if product.purpose is not None}
         for basket in settings.baskets:
             category = basket.category.casefold()
             labels.setdefault(category, STANDARD_CATEGORIES.get(category, f'🗂️ {basket.category}'))
@@ -152,12 +153,14 @@ class BotMenu:
         self.buttons.clear()
         self.in_list = self.add_from_list = False
         keywords = f'«{", ".join(product.required)}»' if product.required else '—'
-        text = '\n'.join([
+        rows = [
             f'🏷️ Название: «{product.name}»',
             f'📦 Количество, которое будет добавлено в один заказ: {product.quantity} шт.',
-            f'🧺 Корзина: «{product.purpose}»',
-            f'🔎 Ключевые слова поиска: {keywords}',
-        ])
+        ]
+        if product.purpose is not None:
+            rows.append(f'🧺 Корзина: «{product.purpose}»')
+        rows.append(f'🔎 Ключевые слова поиска: {keywords}')
+        text = '\n'.join(rows)
         if product.exclude:
             text += f'\n🚫 Слова-исключения: «{", ".join(product.exclude)}»'
         if product.photo:
@@ -243,6 +246,9 @@ class BotMenu:
             if text != 'Подтвердить удаление':
                 await reply('Подтвердите удаление или нажмите «Назад».')
                 return
+            if any(option.product_id == product.id for basket in settings.baskets
+                   for group in basket.groups for option in group.options):
+                raise ValueError('Сначала уберите продукт из готовых корзин.')
             del products[product.id]
             updated = CartSettings.model_validate({**settings.model_dump(), 'products': list(products.values())})
             save_settings(path, updated)

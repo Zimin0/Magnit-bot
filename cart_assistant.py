@@ -84,12 +84,14 @@ class CartAssistant:
 
     async def propose(self, text: str, settings: CartSettings) -> BasketProposal:
         products = [product for product in settings.products if product.sku is not None]
+        products_by_id = {product.id: product for product in products}
         if not settings.baskets and not products:
             raise CartAssistantError('Нет настроенных именных корзин. Добавьте корзину в настройках.')
         skill = self._load_skill()
         catalog = [{
             'id': basket.id, 'name': basket.name, 'category': basket.category,
-            'groups': [{'name': group.name, 'options': [option.name for option in group.options]}
+            'groups': [{'name': group.name,
+                        'options': [products_by_id[option.product_id].name for option in group.options]}
                        for group in basket.groups],
         } for basket in settings.baskets]
         allowed_ids = {item['id'] for item in catalog}
@@ -124,18 +126,27 @@ class CartAssistant:
         except (httpx.HTTPError, ValueError, KeyError, TypeError, UnicodeError):
             raise CartAssistantError('Qwen не смогла предложить корзину. Проверьте Ollama и модель qwen3:8b.') from None
 
-    def _positions(self, basket: Basket) -> dict[str, int]:
+    def _positions(self, basket: Basket, products: list[Product]) -> dict[str, int]:
         try:
             # Settings models are mutable; revalidate before preparing a write.
-            basket = Basket.model_validate(basket.model_dump())
+            settings = CartSettings.model_validate({
+                'address': 'validation', 'products': [product.model_dump() for product in products],
+                'baskets': [basket.model_dump()],
+            })
+            basket = settings.baskets[0]
         except ValidationError:
             raise CartAssistantError('Проверьте состав именной корзины в настройках.') from None
+        products_by_id = {product.id: product for product in settings.products}
         positions: dict[str, int] = {}
         for group in basket.groups:
             chosen = (self.rng.sample(group.options, group.pick) if group.strategy == 'random'
                       else group.options[:group.pick])
             for option in chosen:
-                positions[option.sku] = positions.get(option.sku, 0) + 1
+                product = products_by_id[option.product_id]
+                if product.sku is None:
+                    raise CartAssistantError('Проверьте артикулы любимых продуктов в настройках.')
+                quantity = option.quantity if option.quantity is not None else product.quantity
+                positions[product.sku] = positions.get(product.sku, 0) + quantity
         return positions
 
     @staticmethod
@@ -177,10 +188,10 @@ class CartAssistant:
                 unavailable.append(item['goodId'])
         return total, unavailable
 
-    async def execute(self, basket: Basket,
+    async def execute(self, basket: Basket, products: list[Product],
                       progress: Callable[[str], Awaitable[None]] | None = None) -> CartExecution:
         """Replace the entire cart; caller must first obtain fresh confirmation."""
-        expected = self._positions(basket)
+        expected = self._positions(basket, products)
         return await self._execute_positions(basket.id, basket.name, expected, progress)
 
     async def execute_products(self, selections: list[tuple[Product, int | None]],

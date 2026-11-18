@@ -20,12 +20,19 @@ def configured_basket():
     return Basket.model_validate({
         'id': 'breakfast', 'name': 'Завтрак', 'category': 'Утро', 'groups': [
             {'name': 'Основное', 'pick': 2, 'options': [
-                {'sku': '001', 'name': 'Каша', 'query': PRIVATE, 'photo': PRIVATE},
-                {'sku': '20', 'name': 'Молоко'}, {'sku': '30', 'name': 'Хлеб'},
+                {'product_id': 'porridge'}, {'product_id': 'milk'}, {'product_id': 'bread'},
             ]},
-            {'name': 'Ещё молоко', 'options': [{'sku': '20', 'name': 'Молоко'}]},
+            {'name': 'Ещё молоко', 'options': [{'product_id': 'milk'}]},
         ],
     })
+
+
+def configured_products():
+    return [
+        Product(id='porridge', sku='001', name='Каша'),
+        Product(id='milk', sku='20', name='Молоко'),
+        Product(id='bread', sku='30', name='Хлеб'),
+    ]
 
 
 class FakeCli:
@@ -61,9 +68,28 @@ class FakeCli:
 
 
 class CartAssistantTests(unittest.IsolatedAsyncioTestCase):
+    async def test_basket_execution_resolves_shared_products_and_quantity_overrides(self):
+        products = [
+            Product(id='yogurt', sku='111', name='Йогурт', quantity=1),
+            Product(id='sausages', sku='222', name='Сосиски', quantity=2),
+        ]
+        basket = Basket.model_validate({
+            'id': 'breakfast', 'name': 'Завтрак', 'category': 'Утро',
+            'groups': [{'name': 'Основное', 'pick': 2, 'options': [
+                {'product_id': 'yogurt', 'quantity': 3},
+                {'product_id': 'sausages'},
+            ]}],
+        })
+        cli = FakeCli()
+        cli.after = {'items': [{'goodId': '111', 'qnty': 3}, {'goodId': '222', 'qnty': 2}]}
+
+        result = await CartAssistant(self.client, cli).execute(basket, products)
+
+        self.assertEqual(result.positions, {'111': 3, '222': 2})
+
     def setUp(self):
         self.cli = FakeCli()
-        self.settings = CartSettings(address=PRIVATE, products=[], baskets=[configured_basket()])
+        self.settings = CartSettings(address=PRIVATE, products=configured_products(), baskets=[configured_basket()])
         self.requests = []
         self.reply = {'message': {'role': 'assistant', 'content': json.dumps({
             'kind': 'basket', 'basket_id': 'breakfast', 'items': [],
@@ -103,6 +129,7 @@ class CartAssistantTests(unittest.IsolatedAsyncioTestCase):
                 BasketProposal.model_validate(value)
 
     async def test_qwen_can_select_only_orderable_favorite_products_without_receiving_skus(self):
+        self.settings.baskets = []
         self.settings.products = [
             Product(id='yogurt', sku='777', name='Йогурт', purpose='завтрак', quantity=1),
             Product(id='legacy', name='Старый', purpose='завтрак'),
@@ -127,6 +154,7 @@ class CartAssistantTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.positions, {'777': 2})
 
     async def test_unknown_favorite_product_id_is_rejected_before_cli(self):
+        self.settings.baskets = []
         self.settings.products = [Product(id='yogurt', sku='777', name='Йогурт', purpose='завтрак')]
         self.reply['message']['content'] = json.dumps({
             'kind': 'products', 'basket_id': None,
@@ -170,6 +198,11 @@ class CartAssistantTests(unittest.IsolatedAsyncioTestCase):
                     {'name': 'Ещё молоко', 'options': ['Молоко']},
                 ],
             }],
+            'products': [
+                {'id': 'porridge', 'name': 'Каша', 'default_quantity': 1, 'matching_words': []},
+                {'id': 'milk', 'name': 'Молоко', 'default_quantity': 1, 'matching_words': []},
+                {'id': 'bread', 'name': 'Хлеб', 'default_quantity': 1, 'matching_words': []},
+            ],
         })
         self.assertNotIn(PRIVATE, request.content.decode())
         self.assertEqual(self.cli.events, [])
@@ -189,7 +222,7 @@ class CartAssistantTests(unittest.IsolatedAsyncioTestCase):
         basket.name = injection
         basket.category = injection
         basket.groups[0].name = injection
-        basket.groups[0].options[0].name = injection
+        self.settings.products[0].name = injection
         self.settings.baskets = [basket]
 
         await self.assistant.propose(injection, self.settings)
@@ -270,6 +303,7 @@ class CartAssistantTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_empty_catalog_fails_before_ollama_or_cli(self):
         self.settings.baskets = []
+        self.settings.products = []
         with self.assertRaises(CartAssistantError) as raised:
             await self.assistant.propose('Запрос', self.settings)
         self.assert_safe(raised.exception)
@@ -294,7 +328,7 @@ class CartAssistantTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.requests, [])
 
     async def test_execution_replaces_full_cart_aggregates_duplicates_and_exposes_safe_result(self):
-        result = await self.assistant.execute(configured_basket())
+        result = await self.assistant.execute(configured_basket(), configured_products())
 
         self.assertIsInstance(result, CartExecution)
         self.assertEqual(self.cli.events, ['cart', ('set', {'001': 1, '20': 2}), 'verify', 'checkout'])
@@ -310,7 +344,7 @@ class CartAssistantTests(unittest.IsolatedAsyncioTestCase):
         async def progress(stage):
             self.cli.events.append(('progress', stage))
 
-        await self.assistant.execute(configured_basket(), progress)
+        await self.assistant.execute(configured_basket(), configured_products(), progress)
 
         self.assertEqual(self.cli.events, [
             ('progress', 'reading'), 'cart',
@@ -323,7 +357,7 @@ class CartAssistantTests(unittest.IsolatedAsyncioTestCase):
         basket.groups = [basket.groups[0]]
         basket.groups[0].strategy = 'random'
         self.cli.after = {'items': [{'goodId': '20', 'qnty': 1}, {'goodId': '30', 'qnty': 1}]}
-        result = await CartAssistant(self.client, self.cli, rng=Random(0)).execute(basket)
+        result = await CartAssistant(self.client, self.cli, rng=Random(0)).execute(basket, configured_products())
         self.assertEqual(result.positions, {'20': 1, '30': 1})
 
     async def test_cart_mismatch_including_extras_and_wrong_quantities_stops_checkout(self):
@@ -335,7 +369,7 @@ class CartAssistantTests(unittest.IsolatedAsyncioTestCase):
                 cli = FakeCli()
                 cli.after = {'items': items, 'session': PRIVATE}
                 with self.assertRaises(CartAssistantError) as raised:
-                    await CartAssistant(self.client, cli).execute(configured_basket())
+                    await CartAssistant(self.client, cli).execute(configured_basket(), configured_products())
                 self.assert_safe(raised.exception)
                 self.assertEqual(cli.events, ['cart', ('set', {'001': 1, '20': 2}), 'verify'])
 
@@ -352,7 +386,7 @@ class CartAssistantTests(unittest.IsolatedAsyncioTestCase):
                     cli = FakeCli()
                     setattr(cli, target, payload)
                     with self.assertRaises(CartAssistantError) as raised:
-                        await CartAssistant(self.client, cli).execute(configured_basket())
+                        await CartAssistant(self.client, cli).execute(configured_basket(), configured_products())
                     self.assert_safe(raised.exception)
                     self.assertNotIn('checkout', cli.events)
                     if target == 'before':
@@ -363,13 +397,13 @@ class CartAssistantTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(payload=payload):
                 cli = FakeCli()
                 cli.checkout = payload
-                result = await CartAssistant(self.client, cli).execute(configured_basket())
+                result = await CartAssistant(self.client, cli).execute(configured_basket(), configured_products())
                 self.assertIsNone(result.total)
                 self.assertEqual(result.unavailable, [])
 
     async def test_checkout_unavailable_ids_are_aggregated_without_payload(self):
         self.cli.checkout['unavailableItems'] = [{'goodId': '20'}, {'goodId': '20'}, {'goodId': '001'}]
-        result = await self.assistant.execute(configured_basket())
+        result = await self.assistant.execute(configured_basket(), configured_products())
         self.assertEqual(result.unavailable, ['20', '001'])
 
     async def test_malformed_checkout_known_fields_fail_safely(self):
@@ -384,7 +418,7 @@ class CartAssistantTests(unittest.IsolatedAsyncioTestCase):
                 cli = FakeCli()
                 cli.checkout = payload
                 with self.assertRaises(CartAssistantError) as raised:
-                    await CartAssistant(self.client, cli).execute(configured_basket())
+                    await CartAssistant(self.client, cli).execute(configured_basket(), configured_products())
                 self.assert_safe(raised.exception)
 
     async def test_cli_failure_at_any_stage_is_safe_and_stops_execution(self):
@@ -393,7 +427,7 @@ class CartAssistantTests(unittest.IsolatedAsyncioTestCase):
                 cli = FakeCli()
                 cli.failure = stage
                 with self.assertRaises(CartAssistantError) as raised:
-                    await CartAssistant(self.client, cli).execute(configured_basket())
+                    await CartAssistant(self.client, cli).execute(configured_basket(), configured_products())
                 self.assert_safe(raised.exception)
                 self.assertEqual(cli.events[-1], stage)
 
@@ -402,14 +436,14 @@ class CartAssistantTests(unittest.IsolatedAsyncioTestCase):
             raise asyncio.CancelledError
 
         with self.assertRaises(asyncio.CancelledError):
-            await self.assistant.execute(configured_basket(), cancel)
+            await self.assistant.execute(configured_basket(), configured_products(), cancel)
         self.assertEqual(self.cli.events, [])
 
     async def test_invalid_mutated_basket_is_rejected_before_cli(self):
         basket = configured_basket()
-        basket.groups[0].options[0].sku = PRIVATE
+        basket.groups[0].options[0].product_id = PRIVATE
         with self.assertRaises(CartAssistantError) as raised:
-            await self.assistant.execute(basket)
+            await self.assistant.execute(basket, configured_products())
         self.assert_safe(raised.exception)
         self.assertEqual(self.cli.events, [])
 

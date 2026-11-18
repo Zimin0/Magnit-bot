@@ -129,13 +129,14 @@ class TelegramBotTests(unittest.IsolatedAsyncioTestCase):
         path.write_text('''address: Delivery address
 products:
   - {id: school, sku: '555', name: Apple, purpose: в школу}
+  - {id: yogurt-product, sku: '123', name: Yogurt}
 baskets:
   - id: yogurt
     name: Завтрак-Йогурт
     category: Завтрак
     groups:
       - name: Йогурт
-        options: [{sku: '123', name: Yogurt}]
+        options: [{product_id: yogurt-product}]
 ''', encoding='utf-8')
         return path
 
@@ -399,7 +400,8 @@ baskets:
     async def test_confirmation_executes_exact_basket_once_and_edits_all_stages_and_result(self):
         assistant = self.assistant()
 
-        async def execute(basket, progress):
+        async def execute(basket, products, progress):
+            self.assertEqual({product.id for product in products}, {'school', 'yogurt-product'})
             for phase in ('reading', 'replacing', 'verifying', 'checkout'):
                 await progress(phase)
             return CartExecution(basket.id, basket.name, {'123': 1}, 25409, ['456'])
@@ -620,7 +622,7 @@ baskets:
         started, release = asyncio.Event(), asyncio.Event()
         build = AsyncMock()
 
-        async def execute(basket, progress):
+        async def execute(basket, products, progress):
             started.set()
             await release.wait()
             return CartExecution(basket.id, basket.name, {'123': 1}, None, [])

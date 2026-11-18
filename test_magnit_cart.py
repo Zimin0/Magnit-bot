@@ -35,6 +35,52 @@ async def choose(product, candidates):
 
 
 class CartTests(unittest.IsolatedAsyncioTestCase):
+    def test_named_baskets_reference_the_shared_product_catalog(self):
+        settings = CartSettings.model_validate({
+            'address': 'Address',
+            'products': [
+                {'id': 'yogurt', 'sku': '111', 'name': 'Йогурт', 'quantity': 1},
+                {'id': 'sausages', 'sku': '222', 'name': 'Сосиски', 'quantity': 2},
+            ],
+            'baskets': [{
+                'id': 'breakfast', 'name': 'Завтрак', 'category': 'Утро',
+                'groups': [{'name': 'Основное', 'pick': 2, 'options': [
+                    {'product_id': 'yogurt', 'quantity': 3},
+                    {'product_id': 'sausages'},
+                ]}],
+            }],
+        })
+
+        self.assertEqual(settings.baskets[0].groups[0].options[0].product_id, 'yogurt')
+        with self.assertRaisesRegex(ValidationError, 'missing'):
+            CartSettings.model_validate({
+                **settings.model_dump(),
+                'baskets': [{
+                    'id': 'bad', 'name': 'Bad', 'category': 'Утро',
+                    'groups': [{'name': 'Основное', 'options': [{'product_id': 'missing'}]}],
+                }],
+            })
+        with self.assertRaisesRegex(ValidationError, 'legacy'):
+            CartSettings.model_validate({
+                'address': 'Address',
+                'products': [{'id': 'legacy', 'name': 'Legacy'}],
+                'baskets': [{
+                    'id': 'bad', 'name': 'Bad', 'category': 'Утро',
+                    'groups': [{'name': 'Основное', 'options': [{'product_id': 'legacy'}]}],
+                }],
+            })
+
+    def test_shared_product_catalog_is_not_limited_to_twelve_entries(self):
+        settings = CartSettings.model_validate({
+            'address': 'Address',
+            'products': [
+                {'id': f'product-{index}', 'sku': str(1000 + index), 'name': f'Product {index}'}
+                for index in range(22)
+            ],
+        })
+
+        self.assertEqual(len(settings.products), 22)
+
     def test_favorite_product_sku_is_optional_for_legacy_and_numeric_when_present(self):
         legacy = Product(id='legacy', name='Legacy', purpose='завтрак')
         self.assertIsNone(legacy.sku)
@@ -115,12 +161,19 @@ class CartTests(unittest.IsolatedAsyncioTestCase):
         store.search = search
         basket = Basket.model_validate({'id': 'test', 'name': 'Тест', 'category': 'Завтрак', 'groups': [
             {'name': 'Йогурты', 'pick': 2, 'strategy': 'random', 'options': [
-                {'sku': '111', 'name': 'Йогурт A'}, {'sku': '222', 'name': 'Йогурт B'},
-                {'sku': '555', 'name': 'Йогурт C'},
+                {'product_id': 'yogurt-a'}, {'product_id': 'yogurt-b'},
+                {'product_id': 'yogurt-c'},
             ]},
-            {'name': 'Замена', 'options': [{'sku': '444', 'name': 'Нет в наличии'}, {'sku': '333', 'name': 'Запасной'}]},
+            {'name': 'Замена', 'options': [{'product_id': 'missing'}, {'product_id': 'replacement'}]},
         ]})
-        result = await assemble_cart(store, [], choose, basket=basket)
+        products = [
+            Product(id='yogurt-a', sku='111', name='Йогурт A'),
+            Product(id='yogurt-b', sku='222', name='Йогурт B'),
+            Product(id='yogurt-c', sku='555', name='Йогурт C'),
+            Product(id='missing', sku='444', name='Нет в наличии'),
+            Product(id='replacement', sku='333', name='Запасной'),
+        ]
+        result = await assemble_cart(store, products, choose, basket=basket)
         self.assertEqual(store.items, {'555': 1, '222': 1, '333': 1})
         shuffle.assert_called_once()
         self.assertIn('Тест', result.message())

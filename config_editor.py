@@ -46,8 +46,7 @@ class ConfigEditor:
             if revision != self.revision():
                 raise Conflict('Конфиг уже изменился. Скопируйте нужные правки и обновите страницу перед сохранением.')
             settings = CartSettings.model_validate(data)
-            records = [*settings.products, *(option for basket in settings.baskets
-                         for group in basket.groups for option in group.options)]
+            records = settings.products
             photos = {}
             for record in records:
                 key = record.photo
